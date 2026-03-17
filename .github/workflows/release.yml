@@ -22,6 +22,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Select latest Xcode
+        run: |
+          set -euo pipefail
+          latest_xcode_app="$(find /Applications -maxdepth 1 -type d -name 'Xcode*.app' | sort -V | tail -n 1)"
+          sudo xcode-select -s "$latest_xcode_app/Contents/Developer"
+          xcodebuild -version
+          swift --version
+
       - name: Build release binary
         run: swift build -c release
 
