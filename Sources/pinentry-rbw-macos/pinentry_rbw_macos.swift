@@ -3,7 +3,7 @@ import Foundation
 import LocalAuthentication
 import Security
 
-private let appVersion = "0.1.0"
+let appVersion = "0.1.0"
 
 private final class DebugLog {
     private let handle: FileHandle?
@@ -45,7 +45,7 @@ private final class DebugLog {
     }
 }
 
-private struct Config {
+struct Config {
     let service: String
     let account: String
     let logPath: String?
@@ -60,7 +60,7 @@ private struct Config {
     }
 }
 
-private struct SessionState {
+struct SessionState {
     var title = "rbw Unlock"
     var description = "Enter your Bitwarden master password."
     var prompt = "Master password: "
@@ -647,7 +647,7 @@ private final class PinentryServer {
     }
 }
 
-private func decodeAssuan(_ input: String) -> String {
+func decodeAssuan(_ input: String) -> String {
     var scalars = String.UnicodeScalarView()
     var index = input.startIndex
 
@@ -673,7 +673,7 @@ private func decodeAssuan(_ input: String) -> String {
     return String(scalars)
 }
 
-private func encodeAssuan(_ input: String) -> String {
+func encodeAssuan(_ input: String) -> String {
     var output = ""
     for scalar in input.unicodeScalars {
         switch scalar.value {
