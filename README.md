@@ -15,7 +15,50 @@
 - Touch ID 解锁
 - 在支持的系统配置下，尽量让系统认证界面自行决定是否允许 Apple Watch 参与认证
 
-## 构建
+## 安装
+
+优先建议通过 Homebrew 安装：
+
+```bash
+brew tap pppobear/tap
+brew install pinentry-rbw-macos
+```
+
+如果你只想先试用，也可以直接从 GitHub Releases 下载预编译产物：
+
+- <https://github.com/pppobear/pinentry-rbw-macos/releases>
+
+## 接到 rbw
+
+Homebrew 安装后，直接把 `rbw` 指向 Homebrew 的二进制：
+
+```bash
+rbw config set pinentry "$(brew --prefix)/bin/pinentry-rbw-macos"
+```
+
+如果你使用多 profile，建议保留 `RBW_PROFILE`，这样不同 profile 会落到不同的 Keychain account。
+
+## 管理命令
+
+手动预存主密码：
+
+```bash
+pinentry-rbw-macos --store
+```
+
+从标准输入预存主密码：
+
+```bash
+printf '%s' 'your-master-password' | pinentry-rbw-macos --store-stdin
+```
+
+删除已存主密码：
+
+```bash
+pinentry-rbw-macos --clear
+```
+
+## 开发
 
 ```bash
 cd pinentry-rbw-macos
@@ -28,32 +71,10 @@ swift build -c release
 ./.build/release/pinentry-rbw-macos
 ```
 
-## 接到 rbw
+如果你在本地源码目录里调试，也可以临时把 `rbw` 指向构建产物：
 
 ```bash
 rbw config set pinentry "$(pwd)/.build/release/pinentry-rbw-macos"
-```
-
-如果你使用多 profile，建议保留 `RBW_PROFILE`，这样不同 profile 会落到不同的 Keychain account。
-
-## 管理命令
-
-手动预存主密码：
-
-```bash
-./.build/release/pinentry-rbw-macos --store
-```
-
-从标准输入预存主密码：
-
-```bash
-printf '%s' 'your-master-password' | ./.build/release/pinentry-rbw-macos --store-stdin
-```
-
-删除已存主密码：
-
-```bash
-./.build/release/pinentry-rbw-macos --clear
 ```
 
 ## Release
