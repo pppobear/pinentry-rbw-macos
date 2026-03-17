@@ -89,6 +89,7 @@ git push origin v0.1.0
 发布产物会包含：
 
 - `pinentry-rbw-macos-vX.Y.Z-macos-arm64.zip`
+- `pinentry-rbw-macos-vX.Y.Z-macos-x86_64.zip`
 - 对应的 `sha256` 校验文件
 
 手动触发也可以直接在 GitHub Actions 里运行 `Release` workflow。

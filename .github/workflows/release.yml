@@ -15,8 +15,17 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: macos-14
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            artifact_suffix: macos-arm64
+          - runner: macos-15-intel
+            artifact_suffix: macos-x86_64
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout
@@ -38,7 +47,7 @@ jobs:
           set -euo pipefail
           version="${{ github.event.inputs.version || github.ref_name }}"
           binary_name="pinentry-rbw-macos"
-          archive_name="${binary_name}-${version}-macos-arm64"
+          archive_name="${binary_name}-${version}-${{ matrix.artifact_suffix }}"
 
           mkdir -p "dist/$archive_name"
           cp ".build/release/$binary_name" "dist/$archive_name/"
@@ -50,6 +59,30 @@ jobs:
             "dist/${archive_name}.zip"
 
           shasum -a 256 "dist/${archive_name}.zip" > "dist/${archive_name}.zip.sha256"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_suffix }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download workflow artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifact directories
+        run: |
+          set -euo pipefail
+          find dist -type f \( -name "*.zip" -o -name "*.sha256" \) -exec mv {} dist/ \;
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
