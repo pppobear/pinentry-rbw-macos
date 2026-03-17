@@ -18,20 +18,20 @@
 ## 构建
 
 ```bash
-cd /Users/enoch/projects/pinentry-rbw-macos
+cd pinentry-rbw-macos
 swift build -c release
 ```
 
 二进制路径：
 
 ```bash
-/Users/enoch/projects/pinentry-rbw-macos/.build/release/pinentry-rbw-macos
+./.build/release/pinentry-rbw-macos
 ```
 
 ## 接到 rbw
 
 ```bash
-rbw config set pinentry /Users/enoch/projects/pinentry-rbw-macos/.build/release/pinentry-rbw-macos
+rbw config set pinentry "$(pwd)/.build/release/pinentry-rbw-macos"
 ```
 
 如果你使用多 profile，建议保留 `RBW_PROFILE`，这样不同 profile 会落到不同的 Keychain account。
@@ -41,20 +41,37 @@ rbw config set pinentry /Users/enoch/projects/pinentry-rbw-macos/.build/release/
 手动预存主密码：
 
 ```bash
-/Users/enoch/projects/pinentry-rbw-macos/.build/release/pinentry-rbw-macos --store
+./.build/release/pinentry-rbw-macos --store
 ```
 
 从标准输入预存主密码：
 
 ```bash
-printf '%s' 'your-master-password' | /Users/enoch/projects/pinentry-rbw-macos/.build/release/pinentry-rbw-macos --store-stdin
+printf '%s' 'your-master-password' | ./.build/release/pinentry-rbw-macos --store-stdin
 ```
 
 删除已存主密码：
 
 ```bash
-/Users/enoch/projects/pinentry-rbw-macos/.build/release/pinentry-rbw-macos --clear
+./.build/release/pinentry-rbw-macos --clear
 ```
+
+## Release
+
+推送 `v*` tag 会自动触发 GitHub Actions：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+发布产物会包含：
+
+- `pinentry-rbw-macos-vX.Y.Z-macos-arm64.zip`
+- 对应的 `sha256` 校验文件
+
+手动触发也可以直接在 GitHub Actions 里运行 `Release` workflow。
+手动触发时填写版本号，例如 `v0.1.0`。
 
 ## 环境变量
 

@@ -1,6 +1,8 @@
 #!/bin/zsh
 set -eu
 
+script_dir="${0:A:h}"
+binary="$script_dir/.build/release/pinentry-rbw-macos"
 log_file="/tmp/pinentry-rbw-wrapper.log"
 {
   print -- "=== $(date '+%Y-%m-%d %H:%M:%S') ==="
@@ -11,4 +13,4 @@ log_file="/tmp/pinentry-rbw-wrapper.log"
 } >> "$log_file"
 
 export PINENTRY_RBW_LOG="/tmp/pinentry-rbw.log"
-exec "/Users/enoch/projects/pinentry-rbw-macos/.build/release/pinentry-rbw-macos" "$@"
+exec "$binary" "$@"
