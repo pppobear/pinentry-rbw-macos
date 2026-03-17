@@ -1,0 +1,16 @@
+#compdef pinentry-rbw-macos
+# Zsh completion for pinentry-rbw-macos
+# Install: cp _pinentry-rbw-macos to a directory in $fpath, then run: compinit
+
+_pinentry-rbw-macos() {
+    local -a options
+    options=(
+        '--store[Prompt on /dev/tty and save the master password to Keychain]'
+        '--store-stdin[Read master password from stdin and save it to Keychain]'
+        '--clear[Remove the stored master password from Keychain]'
+        '--help[Show usage information]'
+    )
+    _arguments -s $options
+}
+
+_pinentry-rbw-macos "$@"

@@ -53,6 +53,7 @@ jobs:
           cp ".build/release/$binary_name" "dist/$archive_name/"
           cp README.md "dist/$archive_name/"
           cp pinentry-wrapper.sh "dist/$archive_name/"
+          cp -r completions "dist/$archive_name/"
 
           ditto -c -k --sequesterRsrc --keepParent \
             "dist/$archive_name" \
