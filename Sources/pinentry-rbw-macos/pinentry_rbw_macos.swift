@@ -243,23 +243,25 @@ private final class GUI {
 
 private struct KeychainStore {
     let config: Config
-    let logger: DebugLog
 
     /// 从 Keychain 读取密码。
-    ///
-    /// 若条目带有访问控制（新格式），Keychain 框架会自动弹出 Touch ID / 系统密码验证。
-    /// 若条目不带访问控制（旧格式，即升级前写入的条目），读取成功后立即调用 savePassword
-    /// 进行原地迁移，确保下次读取时强制经过生物识别。
     func fetchPassword(prompt: String) -> RetrievalResult {
-        let context = LAContext()
-        context.localizedReason = prompt
+        switch authorize(prompt: prompt) {
+        case .success:
+            break
+        case .notFound:
+            return .notFound
+        case .unavailable(let reason):
+            return .unavailable(reason)
+        case .cancelled:
+            return .cancelled
+        }
 
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: config.service,
             kSecAttrAccount: config.account,
             kSecReturnData: true,
-            kSecUseAuthenticationContext: context,
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -271,25 +273,6 @@ private struct KeychainStore {
             else {
                 return .unavailable("Keychain 返回了不可解析的数据")
             }
-            // 检测旧格式条目（无访问控制）：尝试在不触发 auth UI 的情况下读取。
-            // 若成功说明该条目不需要生物识别 → 立即迁移到带 .userPresence 的新格式。
-            let noAuthContext = LAContext()
-            noAuthContext.interactionNotAllowed = true
-            let legacyCheck: [CFString: Any] = [
-                kSecClass: kSecClassGenericPassword,
-                kSecAttrService: config.service,
-                kSecAttrAccount: config.account,
-                kSecReturnData: false,
-                kSecUseAuthenticationContext: noAuthContext,
-            ]
-            if SecItemCopyMatching(legacyCheck as CFDictionary, nil) == errSecSuccess {
-                do {
-                    try savePassword(password)
-                    logger.write("Keychain legacy entry migrated to .userPresence access control")
-                } catch {
-                    logger.write("Keychain legacy migration failed (entry preserved without access control): \(error)")
-                }
-            }
             return .success(password)
         case errSecItemNotFound:
             return .notFound
@@ -300,48 +283,35 @@ private struct KeychainStore {
         }
     }
 
-    /// 保存密码到 Keychain，附加 .userPresence 访问控制（Touch ID 优先，回退设备密码）。
-    ///
-    /// kSecAttrAccessControl 不能通过 SecItemUpdate 修改，因此先删除再写入。
-    /// 旧版本写入的不带访问控制的条目在此处得到迁移。
+    /// 保存密码到 Keychain。
     func savePassword(_ password: String) throws {
-        // 先删除旧条目（访问控制属性无法 update，只能 delete + add）
-        let deleteQuery: [CFString: Any] = [
+        let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: config.service,
             kSecAttrAccount: config.account,
         ]
-        SecItemDelete(deleteQuery as CFDictionary)  // 条目不存在时忽略 errSecItemNotFound
 
-        var cfError: Unmanaged<CFError>?
-        let access = SecAccessControlCreateWithFlags(
-            kCFAllocatorDefault,
-            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            .userPresence,  // Touch ID 可用时优先；不可用时回退到设备登录密码
-            &cfError
-        )
-
-        var payload: [CFString: Any] = [
+        let payload: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: config.service,
             kSecAttrAccount: config.account,
             kSecValueData: Data(password.utf8),
         ]
-        // VM / 无安全飞地设备上 SecAccessControlCreateWithFlags 可能失败，
-        // 此时退化为无访问控制存储，保持原有行为。
-        if let access, cfError == nil {
-            payload[kSecAttrAccessControl] = access
-        }
-
         let addStatus = SecItemAdd(payload as CFDictionary, nil)
-        guard addStatus == errSecSuccess else {
-            // 写入失败（例如 Keychain 暂时不可用）：恢复一个不带访问控制的条目，
-            // 避免因 delete 已执行而导致凭证永久丢失。
-            if payload[kSecAttrAccessControl] != nil {
-                var restore = payload
-                restore.removeValue(forKey: kSecAttrAccessControl)
-                SecItemAdd(restore as CFDictionary, nil)
+        switch addStatus {
+        case errSecSuccess:
+            return
+        case errSecDuplicateItem:
+            let attributesToUpdate: [CFString: Any] = [
+                kSecValueData: Data(password.utf8),
+            ]
+            let updateStatus = SecItemUpdate(query as CFDictionary, attributesToUpdate as CFDictionary)
+            guard updateStatus == errSecSuccess else {
+                throw PinentryExit.failed(
+                    SecCopyErrorMessageString(updateStatus, nil) as String? ?? "Keychain 更新失败: \(updateStatus)"
+                )
             }
+        default:
             throw PinentryExit.failed(
                 SecCopyErrorMessageString(addStatus, nil) as String? ?? "Keychain 写入失败: \(addStatus)"
             )
@@ -361,6 +331,55 @@ private struct KeychainStore {
             )
         }
     }
+
+    private func authorize(prompt: String) -> RetrievalResult {
+        let existsQuery: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: config.service,
+            kSecAttrAccount: config.account,
+            kSecReturnAttributes: true,
+        ]
+
+        let existsStatus = SecItemCopyMatching(existsQuery as CFDictionary, nil)
+        if existsStatus == errSecItemNotFound {
+            return .notFound
+        }
+        guard existsStatus == errSecSuccess else {
+            return .unavailable(
+                SecCopyErrorMessageString(existsStatus, nil) as String? ?? "Keychain 检查失败: \(existsStatus)"
+            )
+        }
+
+        let context = LAContext()
+        context.localizedFallbackTitle = "输入登录密码"
+
+        var authError: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
+            return .unavailable(authError?.localizedDescription ?? "当前设备不支持 LocalAuthentication")
+        }
+
+        final class AuthBox: @unchecked Sendable {
+            var result: RetrievalResult = .cancelled
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let authBox = AuthBox()
+        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: prompt) { success, error in
+            if success {
+                authBox.result = .success("")
+            } else {
+                let nsError = error as NSError?
+                if nsError?.code == LAError.userCancel.rawValue || nsError?.code == LAError.appCancel.rawValue {
+                    authBox.result = .cancelled
+                } else {
+                    authBox.result = .unavailable(nsError?.localizedDescription ?? "认证失败")
+                }
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return authBox.result
+    }
 }
 
 private final class PinentryServer {
@@ -368,7 +387,7 @@ private final class PinentryServer {
     private let tty = TTY()
     private let gui = GUI()
     private lazy var logger = DebugLog(path: config.logPath)
-    private lazy var keychain = KeychainStore(config: config, logger: logger)
+    private lazy var keychain = KeychainStore(config: config)
     private var state = SessionState()
 
     func run(arguments: [String]) -> Int32 {
