@@ -328,6 +328,13 @@ private struct KeychainStore {
 
         let addStatus = SecItemAdd(payload as CFDictionary, nil)
         guard addStatus == errSecSuccess else {
+            // 写入失败（例如 Keychain 暂时不可用）：恢复一个不带访问控制的条目，
+            // 避免因 delete 已执行而导致凭证永久丢失。
+            if payload[kSecAttrAccessControl] != nil {
+                var restore = payload
+                restore.removeValue(forKey: kSecAttrAccessControl)
+                SecItemAdd(restore as CFDictionary, nil)
+            }
             throw PinentryExit.failed(
                 SecCopyErrorMessageString(addStatus, nil) as String? ?? "Keychain 写入失败: \(addStatus)"
             )
