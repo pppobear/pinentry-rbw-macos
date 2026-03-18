@@ -245,8 +245,9 @@ private struct KeychainStore {
 
     /// 从 Keychain 读取密码。
     ///
-    /// 若条目带有访问控制（新格式），Keychain 框架会自动弹出 Touch ID / 系统密码验证；
-    /// 若条目不带访问控制（旧格式），则直接返回，下次 savePassword 时会迁移到新格式。
+    /// 若条目带有访问控制（新格式），Keychain 框架会自动弹出 Touch ID / 系统密码验证。
+    /// 若条目不带访问控制（旧格式，即升级前写入的条目），读取成功后立即调用 savePassword
+    /// 进行原地迁移，确保下次读取时强制经过生物识别。
     func fetchPassword(prompt: String) -> RetrievalResult {
         let context = LAContext()
         context.localizedReason = prompt
@@ -267,6 +268,20 @@ private struct KeychainStore {
                 let password = String(data: data, encoding: .utf8)
             else {
                 return .unavailable("Keychain 返回了不可解析的数据")
+            }
+            // 检测旧格式条目（无访问控制）：尝试在不触发 auth UI 的情况下读取。
+            // 若成功说明该条目不需要生物识别 → 立即迁移到带 .userPresence 的新格式。
+            let noAuthContext = LAContext()
+            noAuthContext.interactionNotAllowed = true
+            let legacyCheck: [CFString: Any] = [
+                kSecClass: kSecClassGenericPassword,
+                kSecAttrService: config.service,
+                kSecAttrAccount: config.account,
+                kSecReturnData: false,
+                kSecUseAuthenticationContext: noAuthContext,
+            ]
+            if SecItemCopyMatching(legacyCheck as CFDictionary, nil) == errSecSuccess {
+                try? savePassword(password)
             }
             return .success(password)
         case errSecItemNotFound:
@@ -506,6 +521,14 @@ private final class PinentryServer {
         logger.write("handle GETPIN prompt=\(prompt)")
         if state.preferManualEntry {
             logger.write("GETPIN switching to manual entry due to prior password error")
+            let password = try readPasswordInteractively(state: state)
+            try keychain.savePassword(password)
+            writeData(password)
+            writeOK()
+            return
+        }
+        if state.repeatPrompt != nil {
+            logger.write("GETPIN SETREPEAT active; bypassing Keychain cache for confirmation")
             let password = try readPasswordInteractively(state: state)
             try keychain.savePassword(password)
             writeData(password)
