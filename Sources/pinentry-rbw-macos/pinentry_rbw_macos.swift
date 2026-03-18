@@ -244,8 +244,11 @@ private final class GUI {
 private struct KeychainStore {
     let config: Config
 
-    /// 从 Keychain 读取密码。
-    func fetchPassword(prompt: String) -> RetrievalResult {
+    /// 从 Keychain 读取已存密码。
+    ///
+    /// 约束：所有读取路径都必须经过这里，先做 LocalAuthentication，再读普通 Keychain 条目。
+    /// 不要新增绕过认证的直接读取入口。
+    func fetchAuthorizedPassword(prompt: String) -> RetrievalResult {
         switch authorize(prompt: prompt) {
         case .success:
             break
@@ -257,39 +260,12 @@ private struct KeychainStore {
             return .cancelled
         }
 
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: config.service,
-            kSecAttrAccount: config.account,
-            kSecReturnData: true,
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        switch status {
-        case errSecSuccess:
-            guard
-                let data = item as? Data,
-                let password = String(data: data, encoding: .utf8)
-            else {
-                return .unavailable("Keychain 返回了不可解析的数据")
-            }
-            return .success(password)
-        case errSecItemNotFound:
-            return .notFound
-        case errSecUserCanceled, errSecAuthFailed:
-            return .cancelled
-        default:
-            return .unavailable(SecCopyErrorMessageString(status, nil) as String? ?? "Keychain 读取失败: \(status)")
-        }
+        return readStoredPassword()
     }
 
     /// 保存密码到 Keychain。
     func savePassword(_ password: String) throws {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: config.service,
-            kSecAttrAccount: config.account,
-        ]
+        let query = itemQuery()
 
         let payload: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
@@ -319,12 +295,7 @@ private struct KeychainStore {
     }
 
     func deletePassword() throws {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: config.service,
-            kSecAttrAccount: config.account,
-        ]
-        let status = SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(itemQuery() as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw PinentryExit.failed(
                 SecCopyErrorMessageString(status, nil) as String? ?? "Keychain 删除失败: \(status)"
@@ -332,13 +303,44 @@ private struct KeychainStore {
         }
     }
 
-    private func authorize(prompt: String) -> RetrievalResult {
-        let existsQuery: [CFString: Any] = [
+    private func readStoredPassword() -> RetrievalResult {
+        let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: config.service,
             kSecAttrAccount: config.account,
-            kSecReturnAttributes: true,
+            kSecReturnData: true,
         ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            guard
+                let data = item as? Data,
+                let password = String(data: data, encoding: .utf8)
+            else {
+                return .unavailable("Keychain 返回了不可解析的数据")
+            }
+            return .success(password)
+        case errSecItemNotFound:
+            return .notFound
+        case errSecUserCanceled, errSecAuthFailed:
+            return .cancelled
+        default:
+            return .unavailable(SecCopyErrorMessageString(status, nil) as String? ?? "Keychain 读取失败: \(status)")
+        }
+    }
+
+    private func itemQuery() -> [CFString: Any] {
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: config.service,
+            kSecAttrAccount: config.account,
+        ]
+    }
+
+    private func authorize(prompt: String) -> RetrievalResult {
+        var existsQuery = itemQuery()
+        existsQuery[kSecReturnAttributes] = true
 
         let existsStatus = SecItemCopyMatching(existsQuery as CFDictionary, nil)
         if existsStatus == errSecItemNotFound {
@@ -569,7 +571,7 @@ private final class PinentryServer {
             return
         }
 
-        switch keychain.fetchPassword(prompt: prompt) {
+        switch keychain.fetchAuthorizedPassword(prompt: prompt) {
         case .success(let password):
             logger.write("GETPIN success from keychain")
             writeData(password)
