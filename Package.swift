@@ -14,21 +14,7 @@ let package = Package(
         ),
         .testTarget(
             name: "pinentry-rbw-macosTests",
-            dependencies: ["pinentry-rbw-macos"],
-            swiftSettings: [
-                // Testing.framework 在 CLI Tools 的非标准路径下，需要显式指定
-                .unsafeFlags([
-                    "-F", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
-                ]),
-            ],
-            linkerSettings: [
-                .unsafeFlags([
-                    "-F", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
-                    "-framework", "Testing",
-                    "-Xlinker", "-rpath",
-                    "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
-                ]),
-            ]
+            dependencies: ["pinentry-rbw-macos"]
         ),
     ]
 )
