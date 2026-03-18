@@ -655,8 +655,8 @@ func decodeAssuan(_ input: String) -> String {
         let character = input[index]
         if character == "%" {
             let next = input.index(after: index)
-            let end = input.index(next, offsetBy: 2, limitedBy: input.endIndex) ?? input.endIndex
-            if end <= input.endIndex, next < input.endIndex {
+            // Assuan percent-encoding requires exactly 2 hex digits after %
+            if let end = input.index(next, offsetBy: 2, limitedBy: input.endIndex) {
                 let hex = String(input[next..<end])
                 if let value = UInt8(hex, radix: 16) {
                     let scalar = UnicodeScalar(value)
