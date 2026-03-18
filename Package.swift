@@ -12,5 +12,9 @@ let package = Package(
         .executableTarget(
             name: "pinentry-rbw-macos"
         ),
+        .testTarget(
+            name: "pinentry-rbw-macosTests",
+            dependencies: ["pinentry-rbw-macos"]
+        ),
     ]
 )

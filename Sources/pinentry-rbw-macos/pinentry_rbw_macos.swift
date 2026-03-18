@@ -3,8 +3,13 @@ import Foundation
 import LocalAuthentication
 import Security
 
+let appVersion = "0.1.0"
+
 private final class DebugLog {
     private let handle: FileHandle?
+
+    /// 日志单文件最大字节数（默认 1 MiB）。超限时截断为后半段保留近期内容。
+    private static let maxBytes: UInt64 = 1 * 1024 * 1024
 
     init(path: String?) {
         guard let path, !path.isEmpty else {
@@ -14,6 +19,20 @@ private final class DebugLog {
         let manager = FileManager.default
         if !manager.fileExists(atPath: path) {
             manager.createFile(atPath: path, contents: nil)
+        }
+        // 超过限制时截断：保留后半段（近期日志）
+        if let attrs = try? manager.attributesOfItem(atPath: path),
+           let size = attrs[.size] as? UInt64,
+           size > Self.maxBytes,
+           let fh = FileHandle(forUpdatingAtPath: path)
+        {
+            let keepFrom = size / 2
+            fh.seek(toFileOffset: keepFrom)
+            let tail = fh.readDataToEndOfFile()
+            fh.seek(toFileOffset: 0)
+            fh.write(tail)
+            try? fh.truncate(atOffset: UInt64(tail.count))
+            try? fh.close()
         }
         handle = FileHandle(forWritingAtPath: path)
         try? handle?.seekToEnd()
@@ -26,7 +45,7 @@ private final class DebugLog {
     }
 }
 
-private struct Config {
+struct Config {
     let service: String
     let account: String
     let logPath: String?
@@ -41,11 +60,14 @@ private struct Config {
     }
 }
 
-private struct SessionState {
+struct SessionState {
     var title = "rbw Unlock"
     var description = "Enter your Bitwarden master password."
     var prompt = "Master password: "
     var errorText = ""
+    var okLabel = "OK"
+    var cancelLabel = "Cancel"
+    var repeatPrompt: String? = nil
     var preferManualEntry = false
 
     mutating func reset() {
@@ -53,6 +75,9 @@ private struct SessionState {
         description = "Enter your Bitwarden master password."
         prompt = "Master password: "
         errorText = ""
+        okLabel = "OK"
+        cancelLabel = "Cancel"
+        repeatPrompt = nil
         preferManualEntry = false
     }
 }
@@ -145,19 +170,73 @@ private final class GUI {
 
         let message = escapeForAppleScript(lines.joined(separator: "\n\n"))
         let title = escapeForAppleScript(state.title)
+        let ok = escapeForAppleScript(state.okLabel)
+        let cancel = escapeForAppleScript(state.cancelLabel)
 
         return """
         tell application "System Events"
             activate
-            text returned of (display dialog "\(message)" with title "\(title)" buttons {"Cancel", "OK"} default button "OK" cancel button "Cancel" default answer "" with hidden answer)
+            text returned of (display dialog "\(message)" with title "\(title)" buttons {"\(cancel)", "\(ok)"} default button "\(ok)" cancel button "\(cancel)" default answer "" with hidden answer)
         end tell
         """
+    }
+
+    func showMessage(state: SessionState) {
+        let env = ProcessInfo.processInfo.environment
+        guard env["SSH_CONNECTION"] == nil, env["SSH_TTY"] == nil else { return }
+
+        let message = escapeForAppleScript(
+            [state.description, state.errorText].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        )
+        let title = escapeForAppleScript(state.title)
+        let script = """
+        tell application "System Events"
+            activate
+            display alert "\(title)" message "\(message)"
+        end tell
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        try? process.run()
+        process.waitUntilExit()
+    }
+
+    /// 返回 true 表示用户确认（点击 OK 标签按钮），false 表示取消。
+    func showConfirm(state: SessionState) -> Bool {
+        let env = ProcessInfo.processInfo.environment
+        guard env["SSH_CONNECTION"] == nil, env["SSH_TTY"] == nil else { return false }
+
+        let message = escapeForAppleScript(
+            [state.description, state.errorText].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        )
+        let title  = escapeForAppleScript(state.title)
+        let ok     = escapeForAppleScript(state.okLabel)
+        let cancel = escapeForAppleScript(state.cancelLabel)
+        let script = """
+        tell application "System Events"
+            activate
+            button returned of (display dialog "\(message)" with title "\(title)" buttons {"\(cancel)", "\(ok)"} default button "\(ok)" cancel button "\(cancel)")
+        end tell
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        try? process.run()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 { return false }
+        let result = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return result == state.okLabel
     }
 
     private func escapeForAppleScript(_ text: String) -> String {
         text
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\r", with: "\\r")
             .replacingOccurrences(of: "\n", with: "\\n")
     }
 }
@@ -165,7 +244,11 @@ private final class GUI {
 private struct KeychainStore {
     let config: Config
 
-    func fetchPassword(prompt: String) -> RetrievalResult {
+    /// 从 Keychain 读取已存密码。
+    ///
+    /// 约束：所有读取路径都必须经过这里，先做 LocalAuthentication，再读普通 Keychain 条目。
+    /// 不要新增绕过认证的直接读取入口。
+    func fetchAuthorizedPassword(prompt: String) -> RetrievalResult {
         switch authorize(prompt: prompt) {
         case .success:
             break
@@ -177,13 +260,56 @@ private struct KeychainStore {
             return .cancelled
         }
 
+        return readStoredPassword()
+    }
+
+    /// 保存密码到 Keychain。
+    func savePassword(_ password: String) throws {
+        let query = itemQuery()
+
+        let payload: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: config.service,
+            kSecAttrAccount: config.account,
+            kSecValueData: Data(password.utf8),
+        ]
+        let addStatus = SecItemAdd(payload as CFDictionary, nil)
+        switch addStatus {
+        case errSecSuccess:
+            return
+        case errSecDuplicateItem:
+            let attributesToUpdate: [CFString: Any] = [
+                kSecValueData: Data(password.utf8),
+            ]
+            let updateStatus = SecItemUpdate(query as CFDictionary, attributesToUpdate as CFDictionary)
+            guard updateStatus == errSecSuccess else {
+                throw PinentryExit.failed(
+                    SecCopyErrorMessageString(updateStatus, nil) as String? ?? "Keychain 更新失败: \(updateStatus)"
+                )
+            }
+        default:
+            throw PinentryExit.failed(
+                SecCopyErrorMessageString(addStatus, nil) as String? ?? "Keychain 写入失败: \(addStatus)"
+            )
+        }
+    }
+
+    func deletePassword() throws {
+        let status = SecItemDelete(itemQuery() as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw PinentryExit.failed(
+                SecCopyErrorMessageString(status, nil) as String? ?? "Keychain 删除失败: \(status)"
+            )
+        }
+    }
+
+    private func readStoredPassword() -> RetrievalResult {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: config.service,
             kSecAttrAccount: config.account,
             kSecReturnData: true,
         ]
-
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         switch status {
@@ -197,71 +323,33 @@ private struct KeychainStore {
             return .success(password)
         case errSecItemNotFound:
             return .notFound
-        case errSecUserCanceled:
+        case errSecUserCanceled, errSecAuthFailed:
             return .cancelled
         default:
             return .unavailable(SecCopyErrorMessageString(status, nil) as String? ?? "Keychain 读取失败: \(status)")
         }
     }
 
-    func savePassword(_ password: String) throws {
-        let payload: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: config.service,
-            kSecAttrAccount: config.account,
-            kSecValueData: Data(password.utf8),
-        ]
-
-        let addStatus = SecItemAdd(payload as CFDictionary, nil)
-        if addStatus == errSecSuccess {
-            return
-        }
-        if addStatus != errSecDuplicateItem {
-            throw PinentryExit.failed(SecCopyErrorMessageString(addStatus, nil) as String? ?? "Keychain 写入失败: \(addStatus)")
-        }
-
-        let query: [CFString: Any] = [
+    private func itemQuery() -> [CFString: Any] {
+        [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: config.service,
             kSecAttrAccount: config.account,
         ]
-
-        let attributes: [CFString: Any] = [
-            kSecValueData: Data(password.utf8),
-        ]
-
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if updateStatus != errSecSuccess {
-            throw PinentryExit.failed(SecCopyErrorMessageString(updateStatus, nil) as String? ?? "Keychain 更新失败: \(updateStatus)")
-        }
-    }
-
-    func deletePassword() throws {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: config.service,
-            kSecAttrAccount: config.account,
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw PinentryExit.failed(SecCopyErrorMessageString(status, nil) as String? ?? "Keychain 删除失败: \(status)")
-        }
     }
 
     private func authorize(prompt: String) -> RetrievalResult {
-        let existsQuery: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: config.service,
-            kSecAttrAccount: config.account,
-            kSecReturnAttributes: true,
-        ]
+        var existsQuery = itemQuery()
+        existsQuery[kSecReturnAttributes] = true
 
         let existsStatus = SecItemCopyMatching(existsQuery as CFDictionary, nil)
         if existsStatus == errSecItemNotFound {
             return .notFound
         }
         guard existsStatus == errSecSuccess else {
-            return .unavailable(SecCopyErrorMessageString(existsStatus, nil) as String? ?? "Keychain 检查失败: \(existsStatus)")
+            return .unavailable(
+                SecCopyErrorMessageString(existsStatus, nil) as String? ?? "Keychain 检查失败: \(existsStatus)"
+            )
         }
 
         let context = LAContext()
@@ -272,23 +360,27 @@ private struct KeychainStore {
             return .unavailable(authError?.localizedDescription ?? "当前设备不支持 LocalAuthentication")
         }
 
+        final class AuthBox: @unchecked Sendable {
+            var result: RetrievalResult = .cancelled
+        }
+
         let semaphore = DispatchSemaphore(value: 0)
-        var result: RetrievalResult = .cancelled
+        let authBox = AuthBox()
         context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: prompt) { success, error in
             if success {
-                result = .success("")
+                authBox.result = .success("")
             } else {
                 let nsError = error as NSError?
                 if nsError?.code == LAError.userCancel.rawValue || nsError?.code == LAError.appCancel.rawValue {
-                    result = .cancelled
+                    authBox.result = .cancelled
                 } else {
-                    result = .unavailable(nsError?.localizedDescription ?? "认证失败")
+                    authBox.result = .unavailable(nsError?.localizedDescription ?? "认证失败")
                 }
             }
             semaphore.signal()
         }
         semaphore.wait()
-        return result
+        return authBox.result
     }
 }
 
@@ -381,7 +473,19 @@ private final class PinentryServer {
         let argument = parts.count > 1 ? decodeAssuan(String(parts[1])) : ""
 
         switch command {
-        case "OPTION", "SETOK", "SETCANCEL", "SETOUTPUTFD", "SETNOTOK", "SETREPEAT", "SETREPEATERROR":
+        case "OPTION", "SETOUTPUTFD", "SETNOTOK", "SETREPEATERROR":
+            writeOK()
+            return true
+        case "SETREPEAT":
+            state.repeatPrompt = argument.isEmpty ? nil : argument
+            writeOK()
+            return true
+        case "SETOK":
+            state.okLabel = argument.isEmpty ? "OK" : argument
+            writeOK()
+            return true
+        case "SETCANCEL":
+            state.cancelLabel = argument.isEmpty ? "Cancel" : argument
             writeOK()
             return true
         case "SETTITLE":
@@ -411,6 +515,17 @@ private final class PinentryServer {
         case "GETPIN":
             try handleGetPin()
             return true
+        case "MESSAGE":
+            gui.showMessage(state: state)
+            writeOK()
+            return true
+        case "CONFIRM":
+            if gui.showConfirm(state: state) {
+                writeOK()
+            } else {
+                writeCancel("user cancelled confirmation")
+            }
+            return true
         case "BYE":
             writeOK()
             return false
@@ -426,7 +541,7 @@ private final class PinentryServer {
             writeData(String(ProcessInfo.processInfo.processIdentifier))
             writeOK()
         case "version":
-            writeData("0.1.0")
+            writeData(appVersion)
             writeOK()
         case "flavor":
             writeData("pinentry-rbw-macos")
@@ -447,8 +562,16 @@ private final class PinentryServer {
             writeOK()
             return
         }
+        if state.repeatPrompt != nil {
+            logger.write("GETPIN SETREPEAT active; bypassing Keychain cache for confirmation")
+            let password = try readPasswordInteractively(state: state)
+            try keychain.savePassword(password)
+            writeData(password)
+            writeOK()
+            return
+        }
 
-        switch keychain.fetchPassword(prompt: prompt) {
+        switch keychain.fetchAuthorizedPassword(prompt: prompt) {
         case .success(let password):
             logger.write("GETPIN success from keychain")
             writeData(password)
@@ -473,6 +596,28 @@ private final class PinentryServer {
     }
 
     private func readPasswordInteractively(state: SessionState) throws -> String {
+        guard let repeatLabel = state.repeatPrompt else {
+            return try promptPassword(state: state)
+        }
+        // 需要二次确认：循环直到两次输入匹配或用户取消
+        var currentState = state
+        while true {
+            let password = try promptPassword(state: currentState)
+
+            var repeatState = state
+            repeatState.prompt = repeatLabel.isEmpty ? "Repeat: " : repeatLabel
+            repeatState.description = ""
+            repeatState.errorText = ""
+            let confirmation = try promptPassword(state: repeatState)
+
+            if password == confirmation { return password }
+
+            logger.write("GETPIN repeat mismatch, re-prompting")
+            currentState.errorText = "Passphrases do not match."
+        }
+    }
+
+    private func promptPassword(state: SessionState) throws -> String {
         switch gui.readPassword(state: state) {
         case .success(let password):
             logger.write("password collected via GUI")
@@ -499,6 +644,10 @@ private final class PinentryServer {
         }
 
         let label = state.prompt.isEmpty ? "Master password: " : state.prompt
+        return try readPassphrase(label: label)
+    }
+
+    private func readPassphrase(label: String) throws -> String {
         var buffer = [CChar](repeating: 0, count: 4096)
         let flags = RPP_ECHO_OFF | RPP_REQUIRE_TTY
 
@@ -556,7 +705,7 @@ private final class PinentryServer {
     }
 }
 
-private func decodeAssuan(_ input: String) -> String {
+func decodeAssuan(_ input: String) -> String {
     var scalars = String.UnicodeScalarView()
     var index = input.startIndex
 
@@ -564,8 +713,8 @@ private func decodeAssuan(_ input: String) -> String {
         let character = input[index]
         if character == "%" {
             let next = input.index(after: index)
-            let end = input.index(next, offsetBy: 2, limitedBy: input.endIndex) ?? input.endIndex
-            if end <= input.endIndex, next < input.endIndex {
+            // Assuan percent-encoding requires exactly 2 hex digits after %
+            if let end = input.index(next, offsetBy: 2, limitedBy: input.endIndex) {
                 let hex = String(input[next..<end])
                 if let value = UInt8(hex, radix: 16) {
                     let scalar = UnicodeScalar(value)
@@ -582,7 +731,7 @@ private func decodeAssuan(_ input: String) -> String {
     return String(scalars)
 }
 
-private func encodeAssuan(_ input: String) -> String {
+func encodeAssuan(_ input: String) -> String {
     var output = ""
     for scalar in input.unicodeScalars {
         switch scalar.value {

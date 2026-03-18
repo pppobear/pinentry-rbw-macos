@@ -29,5 +29,5 @@ jobs:
           xcodebuild -version
           swift --version
 
-      - name: Build
-        run: swift build
+      - name: Build and test
+        run: swift test

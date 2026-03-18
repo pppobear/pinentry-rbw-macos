@@ -110,3 +110,6 @@ When running it manually, provide a version such as `v0.1.0`.
 - The GUI password prompt requires a desktop session; SSH and other headless sessions fall back to terminal input
 - Only the minimum `pinentry` behavior needed by `rbw` is implemented right now
 - Whether Apple Watch appears as an authentication option depends on macOS version, hardware, and system settings; this project does not force a companion-only policy
+- The current unlock flow protects reads at the application layer: it runs `LocalAuthentication` before reading a normal Keychain item. This is not the same as storing the password in a Keychain entry enforced with `.userPresence`.
+- This design is intentional for the current project setup: without an Apple developer account, the project does not have a reliable signing / entitlement distribution pipeline for a `.userPresence`-protected Keychain item.
+- As a result, this is better suited to improving day-to-day protection than defending against a local attacker who can already run code as your user and bypass or patch the app's read path.

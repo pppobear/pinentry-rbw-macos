@@ -110,3 +110,6 @@ git push origin v0.1.0
 - GUI 密码框依赖桌面会话；SSH 或其他无图形环境会自动回退到终端输入
 - 当前只实现了 `rbw` 所需的最小 `pinentry` 行为
 - Apple Watch 是否会显示为认证选项，取决于 macOS 版本、硬件和系统设置；当前不会强制 companion-only 策略
+- 当前解锁流程是在应用层做保护：先通过 `LocalAuthentication` 完成认证，再读取普通 Keychain 条目。这和使用 `.userPresence` 强制保护的 Keychain 条目不是一回事。
+- 这是当前项目约束下有意做出的实现选择：由于没有 Apple 开发者账号，项目无法建立一条稳定可分发的签名 / entitlement 链路来支持 `.userPresence` 保护的 Keychain 条目。
+- 因此它更适合提升日常使用场景下的保护强度，而不是防御已经能以当前用户身份运行代码，并绕过或 patch 本程序读取路径的本地攻击者。
