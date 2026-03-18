@@ -236,12 +236,14 @@ private final class GUI {
         text
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\r", with: "\\r")
             .replacingOccurrences(of: "\n", with: "\\n")
     }
 }
 
 private struct KeychainStore {
     let config: Config
+    let logger: DebugLog
 
     /// 从 Keychain 读取密码。
     ///
@@ -281,7 +283,12 @@ private struct KeychainStore {
                 kSecUseAuthenticationContext: noAuthContext,
             ]
             if SecItemCopyMatching(legacyCheck as CFDictionary, nil) == errSecSuccess {
-                try? savePassword(password)
+                do {
+                    try savePassword(password)
+                    logger.write("Keychain legacy entry migrated to .userPresence access control")
+                } catch {
+                    logger.write("Keychain legacy migration failed (entry preserved without access control): \(error)")
+                }
             }
             return .success(password)
         case errSecItemNotFound:
@@ -361,7 +368,7 @@ private final class PinentryServer {
     private let tty = TTY()
     private let gui = GUI()
     private lazy var logger = DebugLog(path: config.logPath)
-    private lazy var keychain = KeychainStore(config: config)
+    private lazy var keychain = KeychainStore(config: config, logger: logger)
     private var state = SessionState()
 
     func run(arguments: [String]) -> Int32 {
