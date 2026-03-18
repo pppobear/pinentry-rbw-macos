@@ -3,7 +3,7 @@ import Testing
 
 @testable import pinentry_rbw_macos
 
-@Suite("Config.load")
+@Suite("Config.load", .serialized)
 struct ConfigTests {
     @Test func defaultsWithNoEnv() {
         let config = withEnv([:]) { Config.load() }
