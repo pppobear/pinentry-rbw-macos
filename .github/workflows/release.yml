@@ -97,14 +97,30 @@ jobs:
   update_homebrew_tap:
     needs: release
     runs-on: ubuntu-latest
-    if: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN != '' }}
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
       TAP_REPOSITORY: ${{ github.repository_owner }}/homebrew-tap
       FORMULA_PATH: Formula/pinentry-rbw-macos.rb
 
     steps:
+      - name: Check tap token
+        id: tap_token
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "$HOMEBREW_TAP_GITHUB_TOKEN" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip tap update when token is missing
+        if: ${{ steps.tap_token.outputs.has_token != 'true' }}
+        run: echo "HOMEBREW_TAP_GITHUB_TOKEN is not configured; skipping Homebrew tap update"
+
       - name: Checkout tap repository
+        if: ${{ steps.tap_token.outputs.has_token == 'true' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ env.TAP_REPOSITORY }}
@@ -113,6 +129,7 @@ jobs:
 
       - name: Compute source archive checksum
         id: archive
+        if: ${{ steps.tap_token.outputs.has_token == 'true' }}
         run: |
           set -euo pipefail
           archive_url="https://github.com/${{ github.repository }}/archive/refs/tags/${VERSION}.tar.gz"
@@ -121,6 +138,7 @@ jobs:
           echo "sha256=$(sha256sum source.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       - name: Update formula
+        if: ${{ steps.tap_token.outputs.has_token == 'true' }}
         working-directory: homebrew-tap
         run: |
           set -euo pipefail
@@ -147,6 +165,7 @@ jobs:
           EOF
 
       - name: Commit and push formula update
+        if: ${{ steps.tap_token.outputs.has_token == 'true' }}
         working-directory: homebrew-tap
         run: |
           set -euo pipefail
