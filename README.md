@@ -95,9 +95,19 @@ Release artifacts include:
 - `pinentry-rbw-macos-vX.Y.Z-macos-arm64.zip`
 - `pinentry-rbw-macos-vX.Y.Z-macos-x86_64.zip`
 - matching `sha256` files
+- an updated Homebrew formula in `pppobear/homebrew-tap` when `HOMEBREW_TAP_GITHUB_TOKEN` is configured
 
 You can also run the `Release` workflow manually from GitHub Actions.
 When running it manually, provide a version such as `v0.1.0`.
+To update the Homebrew tap automatically, add a repository secret named `HOMEBREW_TAP_GITHUB_TOKEN`
+with permission to push to `pppobear/homebrew-tap`.
+
+After the tap has been updated, users need to refresh local metadata before upgrading:
+
+```bash
+brew update
+brew upgrade pinentry-rbw-macos
+```
 
 ## Environment Variables
 

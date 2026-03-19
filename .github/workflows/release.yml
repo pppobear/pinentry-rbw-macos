@@ -93,3 +93,69 @@ jobs:
           files: |
             dist/*.zip
             dist/*.sha256
+
+  update_homebrew_tap:
+    needs: release
+    runs-on: ubuntu-latest
+    if: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN != '' }}
+    env:
+      VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      TAP_REPOSITORY: ${{ github.repository_owner }}/homebrew-tap
+      FORMULA_PATH: Formula/pinentry-rbw-macos.rb
+
+    steps:
+      - name: Checkout tap repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPOSITORY }}
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          path: homebrew-tap
+
+      - name: Compute source archive checksum
+        id: archive
+        run: |
+          set -euo pipefail
+          archive_url="https://github.com/${{ github.repository }}/archive/refs/tags/${VERSION}.tar.gz"
+          curl -fsSL "$archive_url" -o source.tar.gz
+          echo "url=$archive_url" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum source.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Update formula
+        working-directory: homebrew-tap
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$FORMULA_PATH")"
+          cat > "$FORMULA_PATH" <<EOF
+          class PinentryRbwMacos < Formula
+            desc "macOS pinentry for rbw with Touch ID or Apple Watch authentication"
+            homepage "https://github.com/${{ github.repository }}"
+            url "${{ steps.archive.outputs.url }}"
+            sha256 "${{ steps.archive.outputs.sha256 }}"
+            head "https://github.com/${{ github.repository }}.git", branch: "main"
+
+            depends_on :macos
+
+            def install
+              system "swift", "build", "-c", "release", "--disable-sandbox"
+              bin.install ".build/release/pinentry-rbw-macos"
+            end
+
+            test do
+              assert_match "pinentry-rbw-macos", shell_output("#{bin}/pinentry-rbw-macos --help")
+            end
+          end
+          EOF
+
+      - name: Commit and push formula update
+        working-directory: homebrew-tap
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$FORMULA_PATH"
+          if git diff --cached --quiet -- "$FORMULA_PATH"; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+          git commit -m "Update pinentry-rbw-macos to ${VERSION}"
+          git push origin HEAD:main

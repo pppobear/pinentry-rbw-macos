@@ -95,9 +95,19 @@ git push origin v0.1.0
 - `pinentry-rbw-macos-vX.Y.Z-macos-arm64.zip`
 - `pinentry-rbw-macos-vX.Y.Z-macos-x86_64.zip`
 - 对应的 `sha256` 文件
+- 如果配置了 `HOMEBREW_TAP_GITHUB_TOKEN`，还会同步更新 `pppobear/homebrew-tap` 中的 Homebrew formula
 
 你也可以在 GitHub Actions 里手动运行 `Release` workflow。
 手动运行时，填写类似 `v0.1.0` 这样的版本号。
+如果要自动更新 Homebrew tap，需要在仓库里配置名为 `HOMEBREW_TAP_GITHUB_TOKEN` 的 secret，
+并确保它有权限 push 到 `pppobear/homebrew-tap`。
+
+tap 更新后，用户本地还需要刷新 metadata 再升级：
+
+```bash
+brew update
+brew upgrade pinentry-rbw-macos
+```
 
 ## 环境变量
 
