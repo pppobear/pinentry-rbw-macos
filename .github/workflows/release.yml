@@ -150,13 +150,12 @@ jobs:
         working-directory: homebrew-tap
         run: |
           set -euo pipefail
-          if git diff --quiet -- "$FORMULA_PATH"; then
-            echo "Formula already up to date"
-            exit 0
-          fi
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$FORMULA_PATH"
+          if git diff --cached --quiet -- "$FORMULA_PATH"; then
+            echo "Formula already up to date"
+            exit 0
+          fi
           git commit -m "Update pinentry-rbw-macos to ${VERSION}"
           git push origin HEAD:main
