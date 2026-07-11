@@ -5,9 +5,10 @@
 _pinentry-rbw-macos() {
     local -a options
     options=(
-        '--store[Prompt on /dev/tty and save the master password to Keychain]'
+        '--store[Prompt securely and save the master password to Keychain]'
         '--store-stdin[Read master password from stdin and save it to Keychain]'
         '--clear[Remove the stored master password from Keychain]'
+        '--version[Show version information]'
         '--help[Show usage information]'
     )
     _arguments -s $options

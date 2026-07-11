@@ -5,13 +5,16 @@
 complete -c pinentry-rbw-macos -f
 
 complete -c pinentry-rbw-macos -l store \
-    -d 'Prompt on /dev/tty and save the master password to Keychain'
+    -d 'Prompt securely and save the master password to Keychain'
 
 complete -c pinentry-rbw-macos -l store-stdin \
     -d 'Read master password from stdin and save it to Keychain'
 
 complete -c pinentry-rbw-macos -l clear \
     -d 'Remove the stored master password from Keychain'
+
+complete -c pinentry-rbw-macos -l version \
+    -d 'Show version information'
 
 complete -c pinentry-rbw-macos -l help \
     -d 'Show usage information'

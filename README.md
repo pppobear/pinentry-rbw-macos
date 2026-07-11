@@ -30,6 +30,13 @@ If you just want to try it without Homebrew, prebuilt binaries are also availabl
 
 - <https://github.com/pppobear/pinentry-rbw-macos/releases>
 
+The minimum supported system is macOS 13. After downloading a release archive and its matching checksum file,
+verify it from the download directory before extracting it:
+
+```bash
+shasum -a 256 -c pinentry-rbw-macos-vX.Y.Z-macos-arm64.zip.sha256
+```
+
 ## Configure `rbw`
 
 After installing with Homebrew, point `rbw` at the installed binary:
@@ -39,6 +46,9 @@ rbw config set pinentry "$(brew --prefix)/bin/pinentry-rbw-macos"
 ```
 
 If you use multiple profiles, keep `RBW_PROFILE` set consistently so each profile maps to a separate Keychain account.
+
+Only requests whose prompt is exactly `Master Password` are eligible for the Keychain cache. API credentials,
+two-factor authentication codes, and unknown prompts must always be entered manually and are never stored.
 
 ## Management Commands
 
@@ -51,8 +61,13 @@ pinentry-rbw-macos --store
 Seed the master password from standard input:
 
 ```bash
-printf '%s' 'your-master-password' | pinentry-rbw-macos --store-stdin
+read -r -s "master_password?Master password: "
+printf '\n'
+printf '%s' "$master_password" | pinentry-rbw-macos --store-stdin
+unset master_password
 ```
+
+Do not put the master password directly in a shell command, argument, environment variable, or shell history.
 
 Remove the stored password:
 
@@ -83,22 +98,26 @@ rbw config set pinentry "$(pwd)/.build/release/pinentry-rbw-macos"
 
 ## Release
 
-Pushing a `v*` tag triggers the GitHub Actions release workflow:
+Pushing a semantic-version tag triggers the GitHub Actions release workflow:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+version=v1.2.3  # example only; replace with the next release version
+git tag "$version"
+git push origin "$version"
 ```
+
+The workflow treats published assets as immutable: rerunning a release for an existing tag fails instead of replacing
+files. Repository administrators should also enable GitHub immutable releases and a protected tag ruleset for
+platform-level enforcement.
 
 Release artifacts include:
 
 - `pinentry-rbw-macos-vX.Y.Z-macos-arm64.zip`
 - `pinentry-rbw-macos-vX.Y.Z-macos-x86_64.zip`
 - matching `sha256` files
-- an updated Homebrew formula in `pppobear/homebrew-tap` when `HOMEBREW_TAP_GITHUB_TOKEN` is configured
+- an updated Homebrew formula in `pppobear/homebrew-tap` for stable releases when
+  `HOMEBREW_TAP_GITHUB_TOKEN` is configured; prereleases intentionally skip the stable tap
 
-You can also run the `Release` workflow manually from GitHub Actions.
-When running it manually, provide a version such as `v0.1.0`.
 To update the Homebrew tap automatically, add a repository secret named `HOMEBREW_TAP_GITHUB_TOKEN`
 with permission to push to `pppobear/homebrew-tap`.
 
@@ -114,12 +133,34 @@ brew upgrade pinentry-rbw-macos
 - `RBW_PROFILE`
 - `PINENTRY_RBW_SERVICE`
 - `PINENTRY_RBW_ACCOUNT`
+- `PINENTRY_RBW_LOG` (redacted protocol metadata; disabled by default, but paths, errors, and timing remain sensitive)
+
+## Uninstall and cleanup
+
+Clear the Keychain item before removing the executable, then reset `rbw` and uninstall:
+
+```bash
+pinentry-rbw-macos --clear
+rbw config unset pinentry
+brew uninstall pinentry-rbw-macos
+```
+
+Repeat the clear and config commands with each `RBW_PROFILE` you used. Homebrew cannot remove those profile-specific
+Keychain items automatically.
+
+## Security model
+
+The master password is persisted in the macOS login Keychain. The current implementation performs
+`LocalAuthentication` before reading a normal Keychain item; authentication is not yet enforced by the Keychain item
+itself. This improves protection against casual access, but it does not defend against code already running as the
+same user that can bypass or patch this program.
+
+The intended stronger design is a Developer ID signed and notarized binary using a `.userPresence`-protected
+Keychain item. Until a stable signing and upgrade path exists, this limitation remains part of the threat model.
+See [SECURITY.md](./SECURITY.md) for reporting guidance.
 
 ## Known Limitations
 
 - The GUI password prompt requires a desktop session; SSH and other headless sessions fall back to terminal input
 - Only the minimum `pinentry` behavior needed by `rbw` is implemented right now
 - Whether Apple Watch appears as an authentication option depends on macOS version, hardware, and system settings; this project does not force a companion-only policy
-- The current unlock flow protects reads at the application layer: it runs `LocalAuthentication` before reading a normal Keychain item. This is not the same as storing the password in a Keychain entry enforced with `.userPresence`.
-- This design is intentional for the current project setup: without an Apple developer account, the project does not have a reliable signing / entitlement distribution pipeline for a `.userPresence`-protected Keychain item.
-- As a result, this is better suited to improving day-to-day protection than defending against a local attacker who can already run code as your user and bypass or patch the app's read path.
