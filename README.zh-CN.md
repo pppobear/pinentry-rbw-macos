@@ -118,6 +118,7 @@ workflow 会把已发布资产当作不可变内容：已有 tag 的 release 重
 
 如果要自动更新 Homebrew tap，需要在仓库里配置名为 `HOMEBREW_TAP_GITHUB_TOKEN` 的 secret，
 并确保它有权限 push 到 `pppobear/homebrew-tap`。
+workflow 会在 clone tap 前验证该权限；如果资格检查报告凭据无效或缺少 push 权限，请轮换 token。
 
 tap 更新后，用户本地还需要刷新 metadata 再升级：
 

@@ -120,6 +120,8 @@ Release artifacts include:
 
 To update the Homebrew tap automatically, add a repository secret named `HOMEBREW_TAP_GITHUB_TOKEN`
 with permission to push to `pppobear/homebrew-tap`.
+The workflow verifies that permission before cloning the tap; rotate the token if the eligibility check
+reports invalid credentials or missing push access.
 
 After the tap has been updated, users need to refresh local metadata before upgrading:
 
