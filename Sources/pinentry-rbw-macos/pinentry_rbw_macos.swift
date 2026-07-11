@@ -932,16 +932,18 @@ private final class PinentryServer {
             return 1
         } catch PinentryExit.failed(let message) {
             logger.write("fatal messageBytes=\(message.utf8.count)")
-            FileHandle.standardError.write(Data(("fatal: \(message)\n").utf8))
+            FileHandle.standardError.write(Data(("\(localizer.text(.fatalPrefix)) \(message)\n").utf8))
             return 2
         } catch let error as PinentryArgumentError {
             let message = localizer.argumentError(error)
             logger.write("fatal messageBytes=\(message.utf8.count)")
-            FileHandle.standardError.write(Data(("fatal: \(message)\n").utf8))
+            FileHandle.standardError.write(Data(("\(localizer.text(.fatalPrefix)) \(message)\n").utf8))
             return 2
         } catch {
             logger.write("fatal messageBytes=\(error.localizedDescription.utf8.count)")
-            FileHandle.standardError.write(Data(("fatal: \(error.localizedDescription)\n").utf8))
+            FileHandle.standardError.write(
+                Data(("\(localizer.text(.fatalPrefix)) \(error.localizedDescription)\n").utf8)
+            )
             return 2
         }
     }

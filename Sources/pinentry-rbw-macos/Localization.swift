@@ -11,6 +11,7 @@ enum LocalizedMessage: Equatable, Sendable {
     case defaultPrompt
     case okButton
     case cancelButton
+    case fatalPrefix
     case errorPrefix
     case repeatPrompt
     case passphrasesDoNotMatch
@@ -151,6 +152,8 @@ struct Localizer: Equatable, Sendable {
             return "OK"
         case .cancelButton:
             return "Cancel"
+        case .fatalPrefix:
+            return "fatal:"
         case .errorPrefix:
             return "Error:"
         case .repeatPrompt:
@@ -242,6 +245,8 @@ struct Localizer: Equatable, Sendable {
             return "确定"
         case .cancelButton:
             return "取消"
+        case .fatalPrefix:
+            return "错误："
         case .errorPrefix:
             return "错误："
         case .repeatPrompt:

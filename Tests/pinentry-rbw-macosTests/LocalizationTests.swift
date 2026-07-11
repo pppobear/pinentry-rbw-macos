@@ -92,6 +92,7 @@ final class LocalizedCatalogTests: XCTestCase {
             .defaultPrompt,
             .okButton,
             .cancelButton,
+            .fatalPrefix,
             .errorPrefix,
             .repeatPrompt,
             .passphrasesDoNotMatch,

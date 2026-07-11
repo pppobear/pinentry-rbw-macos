@@ -33,16 +33,31 @@ def read_until(descriptor: int, needle: bytes, timeout: float = 5) -> bytes:
     return data
 
 
+def read_available(descriptor: int, timeout: float = 0.2) -> bytes:
+    data = b""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([descriptor], [], [], 0.05)
+        if not ready:
+            continue
+        chunk = os.read(descriptor, 4096)
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
 class Session:
     def __init__(
         self,
         binary: str,
         timeout: str = "0",
-        prompt: str = "API key client__id",
+        prompt: Optional[str] = "API key client__id",
         error: Optional[str] = None,
         locale: Optional[str] = None,
     ) -> None:
         self.master, self.slave = pty.openpty()
+        self.closed = False
         environment = os.environ.copy()
         environment["SSH_CONNECTION"] = "integration-test"
         self.process = subprocess.Popen(
@@ -62,20 +77,34 @@ class Session:
         )
         assert self.process.stdin is not None
         assert self.process.stdout is not None
-        greeting = self.process.stdout.readline()
-        if greeting != b"OK Pleased to meet you\n":
-            raise AssertionError(f"unexpected greeting: {greeting!r}")
-        commands = []
-        if locale is not None:
-            commands.append(f"OPTION lc-messages={locale}")
-        commands.append(f"SETPROMPT {prompt}")
-        if error is not None:
-            commands.append(f"SETERROR {error}")
-        commands.append("GETPIN")
-        self.process.stdin.write(("\n".join(commands) + "\n").encode("utf-8"))
-        self.process.stdin.flush()
-        self.prompt_output = read_until(self.master, prompt.encode("utf-8"))
-        self.assert_echo(False)
+        try:
+            greeting = read_until(self.process.stdout.fileno(), b"\n")
+            if greeting != b"OK Pleased to meet you\n":
+                raise AssertionError(f"unexpected greeting: {greeting!r}")
+            commands = []
+            if locale is not None:
+                commands.append(f"OPTION lc-messages={locale}")
+            if prompt is not None:
+                commands.append(f"SETPROMPT {prompt}")
+            if error is not None:
+                commands.append(f"SETERROR {error}")
+            commands.append("GETPIN")
+            self.process.stdin.write(("\n".join(commands) + "\n").encode("utf-8"))
+            self.process.stdin.flush()
+            expected_prompt = prompt
+            if expected_prompt is None:
+                expected_prompt = "PIN：" if locale and locale.lower().startswith("zh") else "PIN: "
+            self.prompt_output = read_until(self.master, expected_prompt.encode("utf-8"))
+            self.assert_echo(False)
+        except BaseException:
+            self.abort()
+            raise
+
+    def __enter__(self) -> "Session":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.abort()
 
     def assert_echo(self, expected: bool) -> None:
         enabled = bool(termios.tcgetattr(self.slave)[3] & termios.ECHO)
@@ -93,108 +122,117 @@ class Session:
         self.process.wait(timeout=5)
         if self.process.returncode != 0:
             raise AssertionError(f"pinentry exited with {self.process.returncode}")
+        self.close_descriptors()
+
+    def abort(self) -> None:
+        if self.closed:
+            return
+        if self.process.poll() is None:
+            self.process.kill()
+            self.process.wait(timeout=5)
+        self.close_descriptors()
+
+    def close_descriptors(self) -> None:
+        if self.closed:
+            return
         os.close(self.master)
         os.close(self.slave)
+        self.closed = True
 
 
 def test_success(binary: str) -> None:
-    session = Session(binary)
-    secret = b"  CID-123 \t  "
-    os.write(session.master, secret + b"\n")
-    session.read_protocol(b"D " + secret + b"\nOK\n")
-    session.assert_echo(True)
-    terminal_output = session.prompt_output
-    ready, _, _ = select.select([session.master], [], [], 0.2)
-    if ready:
-        terminal_output += os.read(session.master, 4096)
-    if secret in terminal_output:
-        raise AssertionError("secret was echoed to the terminal")
-    session.finish()
+    with Session(binary) as session:
+        secret = b"  CID-123 \t  "
+        os.write(session.master, secret + b"\n")
+        session.read_protocol(b"D " + secret + b"\nOK\n")
+        session.assert_echo(True)
+        terminal_output = session.prompt_output + read_available(session.master)
+        if secret in terminal_output:
+            raise AssertionError("secret was echoed to the terminal")
+        session.finish()
 
 
 def test_cancel(binary: str) -> None:
-    session = Session(binary)
-    os.write(session.master, b"\x04")
-    session.read_protocol(b"ERR 83886179 operation cancelled")
-    session.assert_echo(True)
-    session.finish()
+    with Session(binary) as session:
+        os.write(session.master, b"\x04")
+        session.read_protocol(b"ERR 83886179 operation cancelled")
+        session.assert_echo(True)
+        session.finish()
 
 
 def test_unicode_prompt_and_error(binary: str) -> None:
-    session = Session(
+    with Session(
         binary,
-        prompt="密码：",
+        prompt=None,
         error="密码错误",
         locale="zh_CN.UTF-8",
-    )
-    if "密码错误".encode("utf-8") not in session.prompt_output:
-        raise AssertionError(f"localized error was not written to the terminal: {session.prompt_output!r}")
-    secret = "秘密-123".encode("utf-8")
-    os.write(session.master, secret + b"\n")
-    session.read_protocol(b"D " + secret + b"\nOK\n")
-    session.assert_echo(True)
-    if secret in session.prompt_output:
-        raise AssertionError("Unicode secret was echoed to the terminal")
-    session.finish()
+    ) as session:
+        for expected in ("rbw 解锁", "错误： 密码错误", "PIN："):
+            if expected.encode("utf-8") not in session.prompt_output:
+                raise AssertionError(f"missing localized TTY text {expected!r}: {session.prompt_output!r}")
+        secret = "秘密-123".encode("utf-8")
+        os.write(session.master, secret + b"\n")
+        session.read_protocol(b"D " + secret + b"\nOK\n")
+        session.assert_echo(True)
+        terminal_output = session.prompt_output + read_available(session.master)
+        if secret in terminal_output:
+            raise AssertionError("Unicode secret was echoed to the terminal")
+        session.finish()
 
 
 def test_timeout(binary: str) -> None:
-    session = Session(binary, timeout="1")
-    session.read_protocol(b"ERR 83886179 operation timed out", timeout=4)
-    session.assert_echo(True)
-    session.finish()
+    with Session(binary, timeout="1") as session:
+        session.read_protocol(b"ERR 83886179 operation timed out", timeout=4)
+        session.assert_echo(True)
+        session.finish()
 
 
 def test_stop_signal(binary: str) -> None:
-    session = Session(binary)
-    os.kill(session.process.pid, signal.SIGTSTP)
-    stopped = False
-    protocol_output = b""
-    deadline = time.monotonic() + 5
-    assert session.process.stdout is not None
-    while time.monotonic() < deadline:
-        child, status = os.waitpid(session.process.pid, os.WUNTRACED | os.WNOHANG)
-        if child and os.WIFSTOPPED(status):
-            if os.WSTOPSIG(status) != signal.SIGTSTP:
-                raise AssertionError(f"child stopped on an unexpected signal: {status}")
-            stopped = True
-            break
-        ready, _, _ = select.select([session.process.stdout.fileno()], [], [], 0.1)
-        if ready:
-            protocol_output += os.read(session.process.stdout.fileno(), 4096)
-            if b"ERR 83886179 operation cancelled" in protocol_output:
+    with Session(binary) as session:
+        os.kill(session.process.pid, signal.SIGTSTP)
+        stopped = False
+        protocol_output = b""
+        deadline = time.monotonic() + 5
+        assert session.process.stdout is not None
+        while time.monotonic() < deadline:
+            child, status = os.waitpid(session.process.pid, os.WUNTRACED | os.WNOHANG)
+            if child and os.WIFSTOPPED(status):
+                if os.WSTOPSIG(status) != signal.SIGTSTP:
+                    raise AssertionError(f"child stopped on an unexpected signal: {status}")
+                stopped = True
                 break
-    session.assert_echo(True)
-    if stopped:
-        os.kill(session.process.pid, signal.SIGCONT)
-        session.read_protocol(b"ERR 83886179 operation cancelled")
-    elif b"ERR 83886179 operation cancelled" not in protocol_output:
-        raise AssertionError("SIGTSTP was neither forwarded nor returned as cancellation")
-    session.finish()
+            ready, _, _ = select.select([session.process.stdout.fileno()], [], [], 0.1)
+            if ready:
+                protocol_output += os.read(session.process.stdout.fileno(), 4096)
+                if b"ERR 83886179 operation cancelled" in protocol_output:
+                    break
+        session.assert_echo(True)
+        if stopped:
+            os.kill(session.process.pid, signal.SIGCONT)
+            session.read_protocol(b"ERR 83886179 operation cancelled")
+        elif b"ERR 83886179 operation cancelled" not in protocol_output:
+            raise AssertionError("SIGTSTP was neither forwarded nor returned as cancellation")
+        session.finish()
 
 
 def test_terminating_signal(binary: str) -> None:
-    session = Session(binary)
-    os.kill(session.process.pid, signal.SIGTERM)
-    session.process.wait(timeout=5)
-    if session.process.returncode != -signal.SIGTERM:
-        raise AssertionError(f"unexpected SIGTERM return code: {session.process.returncode}")
-    session.assert_echo(True)
-    os.close(session.master)
-    os.close(session.slave)
+    with Session(binary) as session:
+        os.kill(session.process.pid, signal.SIGTERM)
+        session.process.wait(timeout=5)
+        if session.process.returncode != -signal.SIGTERM:
+            raise AssertionError(f"unexpected SIGTERM return code: {session.process.returncode}")
+        session.assert_echo(True)
 
 
 def test_signal_during_input_cleanup(binary: str) -> None:
     for _ in range(10):
-        session = Session(binary)
-        os.write(session.master, b"x\n")
-        os.kill(session.process.pid, signal.SIGTERM)
-        session.process.wait(timeout=5)
-        if session.process.returncode != -signal.SIGTERM:
-            raise AssertionError(f"SIGTERM was swallowed during cleanup: {session.process.returncode}")
-        session.assert_echo(True)
-        os.close(session.master)
-        os.close(session.slave)
+        with Session(binary) as session:
+            os.write(session.master, b"x\n")
+            os.kill(session.process.pid, signal.SIGTERM)
+            session.process.wait(timeout=5)
+            if session.process.returncode != -signal.SIGTERM:
+                raise AssertionError(f"SIGTERM was swallowed during cleanup: {session.process.returncode}")
+            session.assert_echo(True)
 
 
 def main() -> None:

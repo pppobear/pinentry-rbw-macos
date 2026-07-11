@@ -88,7 +88,7 @@ def test_cli_errors_are_localized(binary: str) -> None:
         expected_status=2,
     )
     assert_contains(english.stderr, "fatal: unsupported argument: --unknown")
-    assert_contains(chinese.stderr, "fatal: 不支持的参数：--unknown")
+    assert_contains(chinese.stderr, "错误： 不支持的参数：--unknown")
 
     explicit = run(
         binary,
@@ -97,7 +97,7 @@ def test_cli_errors_are_localized(binary: str) -> None:
         env=environment(PINENTRY_RBW_LOCALE="en"),
         expected_status=2,
     )
-    assert_contains(explicit.stderr, "fatal: 无效的超时时间：invalid")
+    assert_contains(explicit.stderr, "错误： 无效的超时时间：invalid")
 
 
 def test_protocol_is_language_independent(binary: str) -> None:
