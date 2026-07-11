@@ -49,6 +49,25 @@ rbw config set pinentry "$(brew --prefix)/bin/pinentry-rbw-macos"
 只有 prompt 精确等于 `Master Password` 的请求才允许使用 Keychain 缓存。API 凭据、两步验证验证码以及未知
 prompt 都必须手动输入，并且绝不写入缓存。
 
+## 语言
+
+程序自身的提示和命令输出支持英文与简体中文。可以通过 `--lc-messages LOCALE`、标准 Assuan
+`OPTION lc-messages=LOCALE` 或 `PINENTRY_RBW_LOCALE` 选择语言：
+
+```bash
+PINENTRY_RBW_LOCALE=zh-Hans pinentry-rbw-macos --help
+pinentry-rbw-macos --lc-messages zh_CN.UTF-8 --help
+```
+
+选择顺序依次是 pinentry 显式选项、`PINENTRY_RBW_LOCALE`、`LC_ALL`、`LC_MESSAGES`、`LANG`，最后才是
+macOS 的首选语言列表。`zh`、`zh-Hans`、`zh-CN` 和 `zh-SG` 会使用简体中文；暂不支持的语言（包括繁体
+中文 locale）会回退到英文。
+
+Assuan 调用方通过 `SETTITLE`、`SETDESC`、`SETPROMPT`、`SETOK`、`SETCANCEL` 等命令传入的文案会原样
+显示。特别是 `Master Password` 属于安全敏感的缓存选择条件，不是可翻译文案；把它翻译成“主密码”不会让
+请求获得缓存资格。`LocalAuthentication` 中由 macOS 提供的系统文案仍由系统本地化；程序语言只控制回退
+按钮标题，调用方提供的认证原因仍会原样显示。
+
 ## 管理命令
 
 交互式预存主密码：
@@ -72,6 +91,13 @@ unset master_password
 
 ```bash
 pinentry-rbw-macos --clear
+```
+
+查看完整的本地化命令说明，或输出不随语言变化的版本号：
+
+```bash
+pinentry-rbw-macos --help
+pinentry-rbw-macos --version
 ```
 
 ## 开发
@@ -105,8 +131,8 @@ git tag "$version"
 git push origin "$version"
 ```
 
-workflow 会把已发布资产当作不可变内容：已有 tag 的 release 重新运行时必须失败，不能替换旧文件。仓库管理员
-还应启用 GitHub immutable releases 和 tag ruleset，获得平台层面的强制保护。
+workflow 会把已发布资产当作不可变内容：已有 tag 的 release 重新运行时必须失败，不能替换旧文件。仓库也已为
+后续版本启用 GitHub immutable releases，并通过 tag ruleset 禁止删除或改写 `v*` 标签。
 
 发布产物包括：
 
@@ -133,6 +159,7 @@ brew upgrade pinentry-rbw-macos
 - `PINENTRY_RBW_SERVICE`
 - `PINENTRY_RBW_ACCOUNT`
 - `PINENTRY_RBW_LOG`（已脱敏的协议元数据；默认关闭，但路径、错误与时间信息仍应按敏感信息处理）
+- `PINENTRY_RBW_LOCALE`（`en` 或 `zh-Hans`；优先于标准 locale 环境变量）
 
 ## 卸载与清理
 
@@ -154,10 +181,12 @@ Keychain 条目。
 身份运行、并能绕过或 patch 本程序的代码。
 
 更强的目标方案是使用 Developer ID 签名、notarization，以及受 `.userPresence` 保护的 Keychain 条目。在
-稳定的签名和升级路径建立前，这仍是威胁模型中的明确限制。安全问题报告方式见 [SECURITY.md](./SECURITY.md)。
+稳定的签名和升级路径建立前，这仍是威胁模型中的明确限制。安全问题报告方式见
+[SECURITY.zh-CN.md](./SECURITY.zh-CN.md)。
 
 ## 已知限制
 
 - GUI 密码框依赖桌面会话；SSH 或其他无图形环境会自动回退到终端输入
 - 当前只实现了 `rbw` 所需的最小 `pinentry` 行为
+- 程序自身文案目前只支持英文和简体中文，其他语言会回退到英文
 - Apple Watch 是否会显示为认证选项，取决于 macOS 版本、硬件和系统设置；当前不会强制 companion-only 策略

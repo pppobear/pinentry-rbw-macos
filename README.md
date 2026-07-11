@@ -50,6 +50,26 @@ If you use multiple profiles, keep `RBW_PROFILE` set consistently so each profil
 Only requests whose prompt is exactly `Master Password` are eligible for the Keychain cache. API credentials,
 two-factor authentication codes, and unknown prompts must always be entered manually and are never stored.
 
+## Language
+
+Application-owned prompts and command output support English and Simplified Chinese. Select a language with
+`--lc-messages LOCALE`, the standard Assuan `OPTION lc-messages=LOCALE`, or `PINENTRY_RBW_LOCALE`:
+
+```bash
+PINENTRY_RBW_LOCALE=zh-Hans pinentry-rbw-macos --help
+pinentry-rbw-macos --lc-messages zh_CN.UTF-8 --help
+```
+
+The priority is the explicit pinentry option, `PINENTRY_RBW_LOCALE`, `LC_ALL`, `LC_MESSAGES`, `LANG`, and finally
+the macOS preferred-language list. `zh`, `zh-Hans`, `zh-CN`, and `zh-SG` select Simplified Chinese. Unsupported
+locales, including Traditional Chinese locales, currently fall back to English.
+
+Labels supplied by the Assuan caller through `SETTITLE`, `SETDESC`, `SETPROMPT`, `SETOK`, `SETCANCEL`, and related
+commands are displayed unchanged. In particular, `Master Password` is a security-sensitive cache selector rather
+than translatable UI text; translating it to `主密码` does not make a request cacheable. macOS localizes its own
+`LocalAuthentication` copy; the app locale controls the fallback-button title, while the caller-supplied reason is
+still displayed unchanged.
+
 ## Management Commands
 
 Seed the master password interactively:
@@ -73,6 +93,13 @@ Remove the stored password:
 
 ```bash
 pinentry-rbw-macos --clear
+```
+
+Show the complete, localized command reference or print the language-independent version number:
+
+```bash
+pinentry-rbw-macos --help
+pinentry-rbw-macos --version
 ```
 
 ## Development
@@ -107,8 +134,8 @@ git push origin "$version"
 ```
 
 The workflow treats published assets as immutable: rerunning a release for an existing tag fails instead of replacing
-files. Repository administrators should also enable GitHub immutable releases and a protected tag ruleset for
-platform-level enforcement.
+files. The repository also enables GitHub immutable releases for future versions and protects `v*` tags against
+deletion or rewriting.
 
 Release artifacts include:
 
@@ -136,6 +163,7 @@ brew upgrade pinentry-rbw-macos
 - `PINENTRY_RBW_SERVICE`
 - `PINENTRY_RBW_ACCOUNT`
 - `PINENTRY_RBW_LOG` (redacted protocol metadata; disabled by default, but paths, errors, and timing remain sensitive)
+- `PINENTRY_RBW_LOCALE` (`en` or `zh-Hans`; overrides the standard locale variables)
 
 ## Uninstall and cleanup
 
@@ -159,10 +187,12 @@ same user that can bypass or patch this program.
 
 The intended stronger design is a Developer ID signed and notarized binary using a `.userPresence`-protected
 Keychain item. Until a stable signing and upgrade path exists, this limitation remains part of the threat model.
-See [SECURITY.md](./SECURITY.md) for reporting guidance.
+See [SECURITY.md](./SECURITY.md) for reporting guidance, or read the
+[Simplified Chinese translation](./SECURITY.zh-CN.md).
 
 ## Known Limitations
 
 - The GUI password prompt requires a desktop session; SSH and other headless sessions fall back to terminal input
 - Only the minimum `pinentry` behavior needed by `rbw` is implemented right now
+- Application-owned text currently supports English and Simplified Chinese; other languages fall back to English
 - Whether Apple Watch appears as an authentication option depends on macOS version, hardware, and system settings; this project does not force a companion-only policy

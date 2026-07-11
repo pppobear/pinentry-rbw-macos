@@ -1,5 +1,7 @@
 # Security policy
 
+[简体中文版](./SECURITY.zh-CN.md)
+
 ## Supported versions
 
 Security fixes are provided for the latest release. Older releases should be upgraded before reporting behavior that

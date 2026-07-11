@@ -10,6 +10,11 @@ _pinentry-rbw-macos() {
         '--clear[Remove the stored master password from Keychain]'
         '--version[Show version information]'
         '--help[Show usage information]'
+        '--ttyname=[Use PATH as the terminal device]:terminal device:_files'
+        '--timeout=[Cancel input after SECONDS (0 disables timeout)]:seconds:'
+        '--display=[Pass DISPLAY to the graphical prompt]:display:'
+        '--no-global-grab[Do not request a global input grab]'
+        '--lc-messages=[Select application messages]:locale:(en zh-Hans)'
     )
     _arguments -s $options
 }

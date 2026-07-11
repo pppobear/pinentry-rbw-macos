@@ -8,12 +8,14 @@ final class PinentryInvocationTests: XCTestCase {
             "--timeout", "30",
             "--ttyname", "/dev/ttys007",
             "--display", ":0",
+            "--lc-messages", "zh_CN.UTF-8",
             "--no-global-grab",
         ])
 
         XCTAssertEqual(invocation.timeoutSeconds, 30)
         XCTAssertEqual(invocation.ttyName, "/dev/ttys007")
         XCTAssertEqual(invocation.display, ":0")
+        XCTAssertEqual(invocation.localeMessages, "zh_CN.UTF-8")
         XCTAssertTrue(invocation.noGlobalGrab)
         XCTAssertNil(invocation.managementCommand)
     }
@@ -24,12 +26,14 @@ final class PinentryInvocationTests: XCTestCase {
             "--timeout=5",
             "--ttyname=/dev/tty",
             "--display=local",
+            "--lc-messages=zh-Hans",
         ])
 
         XCTAssertEqual(invocation.managementCommand, "--store")
         XCTAssertEqual(invocation.timeoutSeconds, 5)
         XCTAssertEqual(invocation.ttyName, "/dev/tty")
         XCTAssertEqual(invocation.display, "local")
+        XCTAssertEqual(invocation.localeMessages, "zh-Hans")
     }
 
     func testParsesVersionManagementCommand() throws {
@@ -41,6 +45,28 @@ final class PinentryInvocationTests: XCTestCase {
     func testZeroTimeoutMeansNoTimeout() throws {
         let invocation = try PinentryInvocation.parse(arguments: ["--timeout", "0"])
         XCTAssertNil(invocation.timeoutSeconds)
+    }
+
+    func testExtractsLastLocaleHintBeforeFullValidation() {
+        XCTAssertEqual(
+            PinentryInvocation.localeMessagesHint(in: [
+                "--lc-messages=en",
+                "--timeout", "invalid",
+                "--lc-messages=zh-Hans",
+            ]),
+            "zh-Hans"
+        )
+        XCTAssertNil(PinentryInvocation.localeMessagesHint(in: ["--lc-messages="]))
+        XCTAssertNil(
+            PinentryInvocation.localeMessagesHint(in: [
+                "--display", "--lc-messages=zh-Hans",
+                "--timeout", "invalid",
+            ])
+        )
+        XCTAssertEqual(
+            PinentryInvocation.localeMessagesHint(in: ["--display", ":0", "--lc-messages", "zh-Hans"]),
+            "zh-Hans"
+        )
     }
 
     func testRejectsMissingOptionValue() {
@@ -69,11 +95,13 @@ final class PinentryInvocationTests: XCTestCase {
         try invocation.applyProtocolOption("ttyname=/dev/ttys008")
         try invocation.applyProtocolOption("timeout=12")
         try invocation.applyProtocolOption("display=:1")
+        try invocation.applyProtocolOption("lc-messages=zh_CN.UTF-8")
         try invocation.applyProtocolOption("no-global-grab")
 
         XCTAssertEqual(invocation.ttyName, "/dev/ttys008")
         XCTAssertEqual(invocation.timeoutSeconds, 12)
         XCTAssertEqual(invocation.display, ":1")
+        XCTAssertEqual(invocation.localeMessages, "zh_CN.UTF-8")
         XCTAssertTrue(invocation.noGlobalGrab)
     }
 

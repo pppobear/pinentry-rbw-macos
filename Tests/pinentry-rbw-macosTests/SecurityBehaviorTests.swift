@@ -23,6 +23,7 @@ final class PasswordCachePolicyTests: XCTestCase {
             "Yubikey",
             "Two Factor Authentication",
             "Enter the 6 digit verification code from your authenticator app.",
+            "主密码",
         ]
 
         for prompt in uncacheablePrompts {

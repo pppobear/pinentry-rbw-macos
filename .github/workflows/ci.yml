@@ -50,3 +50,4 @@ jobs:
           swift build
           binary_path="$(swift build --show-bin-path)/pinentry-rbw-macos"
           python3 scripts/test-tty.py "$binary_path"
+          python3 scripts/test-i18n.py "$binary_path"
