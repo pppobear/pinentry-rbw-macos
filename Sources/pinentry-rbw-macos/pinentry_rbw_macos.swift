@@ -256,10 +256,13 @@ func passwordCachePolicy(for state: SessionState) -> PasswordCachePolicy {
 
 func removingSingleProcessLineEnding(_ input: String) -> String {
     if input.hasSuffix("\r\n") {
-        return String(input.dropLast(2))
+        // CRLF is one extended grapheme cluster in Swift. Remove its two
+        // Unicode scalars explicitly so the preceding password character is
+        // never consumed.
+        return String(input.unicodeScalars.dropLast(2))
     }
     if input.hasSuffix("\n") {
-        return String(input.dropLast())
+        return String(input.unicodeScalars.dropLast())
     }
     return input
 }
