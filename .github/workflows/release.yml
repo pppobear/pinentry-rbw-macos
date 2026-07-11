@@ -4,177 +4,591 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Release version tag, for example v0.1.0"
-        required: true
-        type: string
 
-permissions:
-  contents: write
+# Serialize releases so the existence check and release creation cannot race.
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions: {}
 
 jobs:
+  validate_release:
+    name: Validate release request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      REF_TYPE: ${{ github.ref_type }}
+      REQUESTED_VERSION: ${{ github.ref_name }}
+
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      release_version: ${{ steps.release.outputs.release_version }}
+      is_prerelease: ${{ steps.release.outputs.is_prerelease }}
+
+    steps:
+      - name: Validate semantic version tag
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$REF_TYPE" != "tag" ]]; then
+            echo "Release pushes must target a tag" >&2
+            exit 1
+          fi
+
+          if [[ "$REQUESTED_VERSION" != v* ]]; then
+            echo "Release version must start with v" >&2
+            exit 1
+          fi
+
+          release_version="${REQUESTED_VERSION#v}"
+          semver_regex='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+          if ! printf '%s\n' "$release_version" | grep -Eq "$semver_regex"; then
+            echo "Release tag is not strict SemVer 2.0: $REQUESTED_VERSION" >&2
+            exit 1
+          fi
+
+          printf 'version=%s\n' "$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+          printf 'release_version=%s\n' "$release_version" >> "$GITHUB_OUTPUT"
+          version_without_build="${release_version%%+*}"
+          if [[ "$version_without_build" == *-* ]]; then
+            printf 'is_prerelease=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'is_prerelease=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    name: Build ${{ matrix.artifact_suffix }}
+    needs: validate_release
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      BINARY_NAME: pinentry-rbw-macos
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+      EXPECTED_ARCH: ${{ matrix.expected_arch }}
+      EVENT_SHA: ${{ github.sha }}
+      RELEASE_VERSION: ${{ needs.validate_release.outputs.release_version }}
+      VERSION: ${{ needs.validate_release.outputs.version }}
+
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             artifact_suffix: macos-arm64
+            expected_arch: arm64
           - runner: macos-15-intel
             artifact_suffix: macos-x86_64
-
-    runs-on: ${{ matrix.runner }}
+            expected_arch: x86_64
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout exact release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: refs/tags/${{ needs.validate_release.outputs.version }}
 
-      - name: Select latest Xcode
+      - name: Verify tag and pinned toolchain
+        shell: bash
         run: |
           set -euo pipefail
-          latest_xcode_app="$(find /Applications -maxdepth 1 -type d -name 'Xcode*.app' | sort -V | tail -n 1)"
-          sudo xcode-select -s "$latest_xcode_app/Contents/Developer"
-          xcodebuild -version
-          swift --version
+
+          tag_ref="refs/tags/$VERSION"
+          git show-ref --verify --quiet "$tag_ref"
+          head_commit="$(git rev-parse HEAD)"
+          tag_commit="$(git rev-parse "${tag_ref}^{commit}")"
+          event_commit="$(git rev-parse "${EVENT_SHA}^{commit}")"
+          if [[ "$head_commit" != "$tag_commit" || "$tag_commit" != "$event_commit" ]]; then
+            echo "HEAD ($head_commit), $VERSION ($tag_commit), and event SHA ($event_commit) must match" >&2
+            exit 1
+          fi
+
+          if [[ ! -d "$DEVELOPER_DIR" ]]; then
+            echo "Required Xcode 16.2 is unavailable at $DEVELOPER_DIR" >&2
+            exit 1
+          fi
+          xcodebuild -version | tee xcode-version.txt
+          grep -Fxq "Xcode 16.2" xcode-version.txt
+          swift --version | tee swift-version.txt
+          grep -Eq 'Swift version 6\.0([.[:space:]]|$)' swift-version.txt
+
+          runner_arch="$(uname -m)"
+          if [[ "$runner_arch" != "$EXPECTED_ARCH" ]]; then
+            echo "Runner architecture is $runner_arch, expected $EXPECTED_ARCH" >&2
+            exit 1
+          fi
+
+      - name: Inject release version
+        run: ./scripts/set-version.sh "$RELEASE_VERSION"
+
+      - name: Run tests
+        run: swift test
 
       - name: Build release binary
         run: swift build -c release
 
-      - name: Prepare artifacts
+      - name: Run TTY integration tests
+        shell: bash
         run: |
           set -euo pipefail
-          version="${{ github.event.inputs.version || github.ref_name }}"
-          binary_name="pinentry-rbw-macos"
-          archive_name="${binary_name}-${version}-${{ matrix.artifact_suffix }}"
+          binary_path="$(swift build -c release --show-bin-path)/$BINARY_NAME"
+          python3 scripts/test-tty.py "$binary_path"
 
-          mkdir -p "dist/$archive_name"
-          cp ".build/release/$binary_name" "dist/$archive_name/"
-          cp README.md "dist/$archive_name/"
-          cp pinentry-wrapper.sh "dist/$archive_name/"
-          cp -r completions "dist/$archive_name/"
+      - name: Verify binary and protocol version
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          ditto -c -k --sequesterRsrc --keepParent \
-            "dist/$archive_name" \
-            "dist/${archive_name}.zip"
+          binary_path="$(swift build -c release --show-bin-path)/$BINARY_NAME"
+          test -x "$binary_path"
 
-          shasum -a 256 "dist/${archive_name}.zip" > "dist/${archive_name}.zip.sha256"
+          file_output="$(file "$binary_path")"
+          printf '%s\n' "$file_output"
+          printf '%s\n' "$file_output" | grep -Fq 'Mach-O 64-bit executable'
+          binary_archs="$(lipo -archs "$binary_path")"
+          if [[ "$binary_archs" != "$EXPECTED_ARCH" ]]; then
+            echo "Binary architecture is $binary_archs, expected $EXPECTED_ARCH" >&2
+            exit 1
+          fi
+
+          protocol_output="$(printf 'GETINFO version\nBYE\n' | "$binary_path")"
+          printf '%s\n' "$protocol_output"
+          actual_version="$(printf '%s\n' "$protocol_output" | awk '/^D / { print substr($0, 3); exit }')"
+          if [[ "$actual_version" != "$RELEASE_VERSION" ]]; then
+            echo "GETINFO version returned $actual_version, expected $RELEASE_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Prepare and verify archive
+        shell: bash
+        env:
+          ARTIFACT_SUFFIX: ${{ matrix.artifact_suffix }}
+        run: |
+          set -euo pipefail
+
+          binary_path="$(swift build -c release --show-bin-path)/$BINARY_NAME"
+          archive_name="$BINARY_NAME-$VERSION-$ARTIFACT_SUFFIX"
+          archive_dir="dist/$archive_name"
+
+          mkdir -p "$archive_dir/completions"
+          cp "$binary_path" "$archive_dir/$BINARY_NAME"
+          cp README.md "$archive_dir/README.md"
+          cp README.zh-CN.md "$archive_dir/README.zh-CN.md"
+          cp SECURITY.md "$archive_dir/SECURITY.md"
+          cp completions/_pinentry-rbw-macos "$archive_dir/completions/"
+          cp completions/pinentry-rbw-macos.fish "$archive_dir/completions/"
+
+          (
+            cd dist
+            COPYFILE_DISABLE=1 /usr/bin/zip -X -q -r "$archive_name.zip" "$archive_name"
+          )
+
+          unzip -Z1 "dist/$archive_name.zip" | LC_ALL=C sort > actual-archive-files.txt
+          cat > expected-archive-files.txt <<EOF
+          $archive_name/
+          $archive_name/README.md
+          $archive_name/README.zh-CN.md
+          $archive_name/SECURITY.md
+          $archive_name/completions/
+          $archive_name/completions/_pinentry-rbw-macos
+          $archive_name/completions/pinentry-rbw-macos.fish
+          $archive_name/pinentry-rbw-macos
+          EOF
+          LC_ALL=C sort -o expected-archive-files.txt expected-archive-files.txt
+          diff -u expected-archive-files.txt actual-archive-files.txt
+          rm -rf archive-check
+          mkdir archive-check
+          unzip -q "dist/$archive_name.zip" -d archive-check
+          test -x "archive-check/$archive_name/$BINARY_NAME"
+
+          (
+            cd dist
+            shasum -a 256 "$archive_name.zip" > "$archive_name.zip.sha256"
+            shasum -a 256 --check "$archive_name.zip.sha256"
+          )
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ matrix.artifact_suffix }}
+          name: release-${{ needs.validate_release.outputs.version }}-${{ matrix.artifact_suffix }}
           path: |
             dist/*.zip
             dist/*.sha256
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
   release:
-    needs: build
+    name: Publish verified release
+    needs:
+      - validate_release
+      - build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EVENT_SHA: ${{ github.sha }}
+      IS_PRERELEASE: ${{ needs.validate_release.outputs.is_prerelease }}
+      RELEASE_VERSION: ${{ needs.validate_release.outputs.release_version }}
+      VERSION: ${{ needs.validate_release.outputs.version }}
 
     steps:
-      - name: Download workflow artifacts
-        uses: actions/download-artifact@v4
+      - name: Checkout and revalidate exact release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          path: dist
+          fetch-depth: 0
+          persist-credentials: false
+          ref: refs/tags/${{ needs.validate_release.outputs.version }}
 
-      - name: Flatten artifact directories
+      - name: Bind release to triggering commit
+        shell: bash
         run: |
           set -euo pipefail
-          find dist -type f \( -name "*.zip" -o -name "*.sha256" \) -exec mv {} dist/ \;
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+          tag_ref="refs/tags/$VERSION"
+          head_commit="$(git rev-parse HEAD)"
+          tag_commit="$(git rev-parse "${tag_ref}^{commit}")"
+          event_commit="$(git rev-parse "${EVENT_SHA}^{commit}")"
+          if [[ "$head_commit" != "$tag_commit" || "$tag_commit" != "$event_commit" ]]; then
+            echo "HEAD ($head_commit), $VERSION ($tag_commit), and event SHA ($event_commit) must match" >&2
+            exit 1
+          fi
+
+      - name: Download workflow artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          tag_name: ${{ github.event.inputs.version || github.ref_name }}
-          generate_release_notes: true
-          files: |
+          path: dist
+          merge-multiple: true
+
+      - name: Verify downloaded artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected_files=(
+            "pinentry-rbw-macos-$VERSION-macos-arm64.zip"
+            "pinentry-rbw-macos-$VERSION-macos-arm64.zip.sha256"
+            "pinentry-rbw-macos-$VERSION-macos-x86_64.zip"
+            "pinentry-rbw-macos-$VERSION-macos-x86_64.zip.sha256"
+          )
+
+          if [[ "$(find dist -maxdepth 1 -type f | wc -l | tr -d ' ')" != "${#expected_files[@]}" ]]; then
+            echo "Unexpected release artifact count" >&2
+            find dist -maxdepth 2 -type f -print
+            exit 1
+          fi
+
+          for filename in "${expected_files[@]}"; do
+            test -f "dist/$filename"
+          done
+
+          for checksum_path in dist/*.sha256; do
+            checksum_name="$(basename "$checksum_path")"
+            archive_name="${checksum_name%.sha256}"
+            read -r digest recorded_name extra < "$checksum_path"
+            if [[ ! "$digest" =~ ^[0-9a-f]{64}$ || "$recorded_name" != "$archive_name" || -n "${extra:-}" ]]; then
+              echo "Malformed checksum file: $checksum_name" >&2
+              exit 1
+            fi
+            (cd dist && sha256sum --check "$checksum_name")
+          done
+
+      - name: Refuse to replace an existing release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          existing_tags="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name')"
+          if printf '%s\n' "$existing_tags" | grep -Fxq -- "$VERSION"; then
+            echo "Release $VERSION already exists; existing releases and assets are immutable" >&2
+            exit 1
+          fi
+
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: |
             dist/*.zip
             dist/*.sha256
 
-  update_homebrew_tap:
-    needs: release
-    runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ github.event.inputs.version || github.ref_name }}
-      TAP_REPOSITORY: ${{ github.repository_owner }}/homebrew-tap
-      FORMULA_PATH: Formula/pinentry-rbw-macos.rb
-
-    steps:
-      - name: Check tap token
-        id: tap_token
-        env:
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+      - name: Create draft GitHub release
+        id: create_draft
+        shell: bash
         run: |
           set -euo pipefail
-          if [ -n "$HOMEBREW_TAP_GITHUB_TOKEN" ]; then
-            echo "has_token=true" >> "$GITHUB_OUTPUT"
+
+          marker="<!-- pinentry-rbw-macos-release-workflow run=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT -->"
+          release_args=(
+            release create "$VERSION"
+            --repo "$GITHUB_REPOSITORY"
+            --verify-tag
+            --generate-notes
+            --notes "$marker"
+            --title "$VERSION"
+            --draft
+          )
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            release_args+=(--prerelease)
+          fi
+          release_args+=(dist/*.zip dist/*.sha256)
+          printf 'attempted=true\n' >> "$GITHUB_OUTPUT"
+          gh "${release_args[@]}"
+
+      - name: Verify draft assets and publish release
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected_files=(
+            "pinentry-rbw-macos-$VERSION-macos-arm64.zip"
+            "pinentry-rbw-macos-$VERSION-macos-arm64.zip.sha256"
+            "pinentry-rbw-macos-$VERSION-macos-x86_64.zip"
+            "pinentry-rbw-macos-$VERSION-macos-x86_64.zip.sha256"
+          )
+          release_json="$(gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,assets)"
+          printf '%s\n' "$release_json" | jq -e --arg version "$VERSION" \
+            '.tagName == $version and .isDraft == true and (.assets | length == 4)' >/dev/null
+
+          for filename in "${expected_files[@]}"; do
+            local_size="$(stat -c '%s' "dist/$filename")"
+            remote_size="$(printf '%s\n' "$release_json" | jq -er --arg name "$filename" \
+              '.assets | map(select(.name == $name)) | if length == 1 then .[0].size else error("asset mismatch") end')"
+            if [[ "$remote_size" != "$local_size" ]]; then
+              echo "Remote size for $filename is $remote_size, expected $local_size" >&2
+              exit 1
+            fi
+          done
+
+          mkdir verified-release
+          gh release download "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir verified-release \
+            --pattern '*.zip' \
+            --pattern '*.sha256'
+          if [[ "$(find verified-release -maxdepth 1 -type f | wc -l | tr -d ' ')" != "4" ]]; then
+            echo "Downloaded draft does not contain exactly four assets" >&2
+            exit 1
+          fi
+          for filename in "${expected_files[@]}"; do
+            cmp -- "dist/$filename" "verified-release/$filename"
+          done
+          (cd verified-release && sha256sum --check --strict ./*.sha256)
+
+          mkdir verified-unpacked
+          for archive_path in verified-release/*.zip; do
+            archive_name="$(basename "$archive_path" .zip)"
+            unzip -q "$archive_path" -d "verified-unpacked/$archive_name"
+            test -x "verified-unpacked/$archive_name/$archive_name/pinentry-rbw-macos"
+          done
+
+          gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false
+          gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft \
+            --jq '.isDraft == false' | grep -Fxq true
+
+      - name: Remove this run's failed draft
+        if: ${{ (failure() || cancelled()) && steps.create_draft.outputs.attempted == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          marker="<!-- pinentry-rbw-macos-release-workflow run=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT -->"
+          release_json="$(gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft,body 2>/dev/null || true)"
+          if [[ -n "$release_json" ]] && printf '%s\n' "$release_json" | jq -e \
+            --arg marker "$marker" '.isDraft == true and (.body | contains($marker))' >/dev/null; then
+            gh release delete "$VERSION" --repo "$GITHUB_REPOSITORY" --yes
           else
-            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            echo "No draft created by this run is safe to remove"
           fi
 
-      - name: Skip tap update when token is missing
-        if: ${{ steps.tap_token.outputs.has_token != 'true' }}
-        run: echo "HOMEBREW_TAP_GITHUB_TOKEN is not configured; skipping Homebrew tap update"
+  update_homebrew_tap:
+    name: Update Homebrew tap
+    needs:
+      - validate_release
+      - release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      FORMULA_PATH: Formula/pinentry-rbw-macos.rb
+      IS_PRERELEASE: ${{ needs.validate_release.outputs.is_prerelease }}
+      RELEASE_VERSION: ${{ needs.validate_release.outputs.release_version }}
+      SOURCE_REPOSITORY: ${{ github.repository }}
+      TAP_REPOSITORY: ${{ github.repository_owner }}/homebrew-tap
+      VERSION: ${{ needs.validate_release.outputs.version }}
+
+    steps:
+      - name: Check tap update eligibility
+        id: tap_policy
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            echo "should_update=false" >> "$GITHUB_OUTPUT"
+            echo "Prerelease $VERSION will not update the stable Homebrew formula"
+          elif [[ -n "$HOMEBREW_TAP_GITHUB_TOKEN" ]]; then
+            echo "should_update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_update=false" >> "$GITHUB_OUTPUT"
+            echo "HOMEBREW_TAP_GITHUB_TOKEN is not configured; skipping tap update"
+          fi
 
       - name: Checkout tap repository
-        if: ${{ steps.tap_token.outputs.has_token == 'true' }}
-        uses: actions/checkout@v4
+        if: steps.tap_policy.outputs.should_update == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: ${{ env.TAP_REPOSITORY }}
           token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           path: homebrew-tap
+          ref: main
 
-      - name: Compute source archive checksum
-        id: archive
-        if: ${{ steps.tap_token.outputs.has_token == 'true' }}
+      - name: Download and verify release archives
+        id: assets
+        if: steps.tap_policy.outputs.should_update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
-          archive_url="https://github.com/${{ github.repository }}/archive/refs/tags/${VERSION}.tar.gz"
-          curl -fsSL "$archive_url" -o source.tar.gz
-          echo "url=$archive_url" >> "$GITHUB_OUTPUT"
-          echo "sha256=$(sha256sum source.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
-      - name: Update formula
-        if: ${{ steps.tap_token.outputs.has_token == 'true' }}
+          mkdir tap-assets
+          gh release download "$VERSION" \
+            --repo "$SOURCE_REPOSITORY" \
+            --dir tap-assets \
+            --pattern '*.zip' \
+            --pattern '*.sha256'
+
+          if [[ "$(find tap-assets -maxdepth 1 -type f | wc -l | tr -d ' ')" != "4" ]]; then
+            echo "Expected exactly four release assets for Homebrew" >&2
+            find tap-assets -maxdepth 1 -type f -print
+            exit 1
+          fi
+
+          for artifact_suffix in macos-arm64 macos-x86_64; do
+            archive_name="pinentry-rbw-macos-$VERSION-$artifact_suffix.zip"
+            checksum_name="$archive_name.sha256"
+            archive_root="${archive_name%.zip}"
+            test -f "tap-assets/$archive_name"
+            test -f "tap-assets/$checksum_name"
+
+            read -r digest recorded_name extra < "tap-assets/$checksum_name"
+            if [[ ! "$digest" =~ ^[0-9a-f]{64}$ || "$recorded_name" != "$archive_name" || -n "${extra:-}" ]]; then
+              echo "Malformed checksum file: $checksum_name" >&2
+              exit 1
+            fi
+            (cd tap-assets && sha256sum --check --strict "$checksum_name")
+
+            unzip -Z1 "tap-assets/$archive_name" | LC_ALL=C sort > "actual-$artifact_suffix.txt"
+            cat > "expected-$artifact_suffix.txt" <<EOF
+          $archive_root/
+          $archive_root/README.md
+          $archive_root/README.zh-CN.md
+          $archive_root/SECURITY.md
+          $archive_root/completions/
+          $archive_root/completions/_pinentry-rbw-macos
+          $archive_root/completions/pinentry-rbw-macos.fish
+          $archive_root/pinentry-rbw-macos
+          EOF
+            LC_ALL=C sort -o "expected-$artifact_suffix.txt" "expected-$artifact_suffix.txt"
+            diff -u "expected-$artifact_suffix.txt" "actual-$artifact_suffix.txt"
+            mkdir "unpacked-$artifact_suffix"
+            unzip -q "tap-assets/$archive_name" -d "unpacked-$artifact_suffix"
+            test -x "unpacked-$artifact_suffix/$archive_root/pinentry-rbw-macos"
+
+            case "$artifact_suffix" in
+              macos-arm64) output_prefix=arm64 ;;
+              macos-x86_64) output_prefix=x86_64 ;;
+              *) exit 1 ;;
+            esac
+            asset_url="https://github.com/$SOURCE_REPOSITORY/releases/download/$VERSION/$archive_name"
+            printf '%s_sha256=%s\n' "$output_prefix" "$digest" >> "$GITHUB_OUTPUT"
+            printf '%s_url=%s\n' "$output_prefix" "$asset_url" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Update and validate formula
+        if: steps.tap_policy.outputs.should_update == 'true'
         working-directory: homebrew-tap
+        env:
+          ARM64_SHA256: ${{ steps.assets.outputs.arm64_sha256 }}
+          ARM64_URL: ${{ steps.assets.outputs.arm64_url }}
+          X86_64_SHA256: ${{ steps.assets.outputs.x86_64_sha256 }}
+          X86_64_URL: ${{ steps.assets.outputs.x86_64_url }}
+        shell: bash
         run: |
           set -euo pipefail
+
+          if [[ -L "$FORMULA_PATH" ]]; then
+            echo "$FORMULA_PATH must not be a symbolic link" >&2
+            exit 1
+          fi
+          if [[ ! "$ARM64_SHA256" =~ ^[0-9a-f]{64}$ || ! "$X86_64_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Release asset checksums are invalid" >&2
+            exit 1
+          fi
           mkdir -p "$(dirname "$FORMULA_PATH")"
           cat > "$FORMULA_PATH" <<EOF
           class PinentryRbwMacos < Formula
             desc "macOS pinentry for rbw with Touch ID or Apple Watch authentication"
-            homepage "https://github.com/${{ github.repository }}"
-            url "${{ steps.archive.outputs.url }}"
-            sha256 "${{ steps.archive.outputs.sha256 }}"
-            head "https://github.com/${{ github.repository }}.git", branch: "main"
+            homepage "https://github.com/$SOURCE_REPOSITORY"
+            version "$RELEASE_VERSION"
 
-            depends_on :macos
+            on_arm do
+              url "$ARM64_URL"
+              sha256 "$ARM64_SHA256"
+            end
+
+            on_intel do
+              url "$X86_64_URL"
+              sha256 "$X86_64_SHA256"
+            end
+
+            depends_on macos: :ventura
 
             def install
-              system "swift", "build", "-c", "release", "--disable-sandbox"
-              bin.install ".build/release/pinentry-rbw-macos"
+              bin.install "pinentry-rbw-macos"
+              zsh_completion.install "completions/_pinentry-rbw-macos"
+              fish_completion.install "completions/pinentry-rbw-macos.fish"
             end
 
             test do
-              assert_match "pinentry-rbw-macos", shell_output("#{bin}/pinentry-rbw-macos --help")
+              output = pipe_output("#{bin}/pinentry-rbw-macos", "GETINFO version\\nBYE\\n")
+              assert_match "D #{version}", output
             end
           end
           EOF
 
+          ruby -c "$FORMULA_PATH"
+          git diff --check -- "$FORMULA_PATH"
+          git diff -- "$FORMULA_PATH"
+
       - name: Commit and push formula update
-        if: ${{ steps.tap_token.outputs.has_token == 'true' }}
+        if: steps.tap_policy.outputs.should_update == 'true'
         working-directory: homebrew-tap
+        shell: bash
         run: |
           set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$FORMULA_PATH"
+          git add -- "$FORMULA_PATH"
           if git diff --cached --quiet -- "$FORMULA_PATH"; then
-            echo "Formula already up to date"
+            echo "Formula already matches $VERSION"
             exit 0
           fi
-          git commit -m "Update pinentry-rbw-macos to ${VERSION}"
+          git commit -m "Update pinentry-rbw-macos to $VERSION"
           git push origin HEAD:main

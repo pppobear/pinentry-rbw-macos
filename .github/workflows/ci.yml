@@ -6,28 +6,47 @@ on:
       - main
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
 jobs:
   build:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+
     strategy:
       fail-fast: false
       matrix:
         runner:
-          - macos-14
+          - macos-15
           - macos-15-intel
-
-    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
-      - name: Select latest Xcode
+      - name: Verify pinned toolchain
         run: |
           set -euo pipefail
-          latest_xcode_app="$(find /Applications -maxdepth 1 -type d -name 'Xcode*.app' | sort -V | tail -n 1)"
-          sudo xcode-select -s "$latest_xcode_app/Contents/Developer"
-          xcodebuild -version
-          swift --version
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version | tee xcode-version.txt
+          grep -Fxq "Xcode 16.2" xcode-version.txt
+          swift --version | tee swift-version.txt
+          grep -Eq 'Swift version 6\.0([.[:space:]]|$)' swift-version.txt
 
       - name: Build and test
-        run: swift test
+        run: |
+          set -euo pipefail
+          swift test
+          swift build
+          binary_path="$(swift build --show-bin-path)/pinentry-rbw-macos"
+          python3 scripts/test-tty.py "$binary_path"

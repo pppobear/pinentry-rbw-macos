@@ -30,6 +30,12 @@ brew install pinentry-rbw-macos
 
 - <https://github.com/pppobear/pinentry-rbw-macos/releases>
 
+最低支持 macOS 13。下载 release 压缩包及对应 checksum 后，请先在下载目录完成校验再解压：
+
+```bash
+shasum -a 256 -c pinentry-rbw-macos-vX.Y.Z-macos-arm64.zip.sha256
+```
+
 ## 配置 `rbw`
 
 通过 Homebrew 安装后，直接把 `rbw` 指向安装好的二进制：
@@ -39,6 +45,9 @@ rbw config set pinentry "$(brew --prefix)/bin/pinentry-rbw-macos"
 ```
 
 如果你使用多个 profile，建议始终保持 `RBW_PROFILE` 一致，这样每个 profile 都会映射到独立的 Keychain account。
+
+只有 prompt 精确等于 `Master Password` 的请求才允许使用 Keychain 缓存。API 凭据、两步验证验证码以及未知
+prompt 都必须手动输入，并且绝不写入缓存。
 
 ## 管理命令
 
@@ -51,8 +60,13 @@ pinentry-rbw-macos --store
 从标准输入预存主密码：
 
 ```bash
-printf '%s' 'your-master-password' | pinentry-rbw-macos --store-stdin
+read -r -s "master_password?主密码："
+printf '\n'
+printf '%s' "$master_password" | pinentry-rbw-macos --store-stdin
+unset master_password
 ```
+
+不要把主密码直接写进 shell 命令、参数、环境变量或 shell history。
 
 删除已存主密码：
 
@@ -83,22 +97,25 @@ rbw config set pinentry "$(pwd)/.build/release/pinentry-rbw-macos"
 
 ## Release
 
-推送 `v*` tag 会触发 GitHub Actions release workflow：
+推送符合语义化版本格式的 tag 会触发 GitHub Actions release workflow：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+version=v1.2.3  # 仅作示例；请替换为下一发布版本
+git tag "$version"
+git push origin "$version"
 ```
+
+workflow 会把已发布资产当作不可变内容：已有 tag 的 release 重新运行时必须失败，不能替换旧文件。仓库管理员
+还应启用 GitHub immutable releases 和 tag ruleset，获得平台层面的强制保护。
 
 发布产物包括：
 
 - `pinentry-rbw-macos-vX.Y.Z-macos-arm64.zip`
 - `pinentry-rbw-macos-vX.Y.Z-macos-x86_64.zip`
 - 对应的 `sha256` 文件
-- 如果配置了 `HOMEBREW_TAP_GITHUB_TOKEN`，还会同步更新 `pppobear/homebrew-tap` 中的 Homebrew formula
+- 对稳定版本，如果配置了 `HOMEBREW_TAP_GITHUB_TOKEN`，还会同步更新 `pppobear/homebrew-tap` 中的
+  Homebrew formula；预发布版本不会更新稳定 tap
 
-你也可以在 GitHub Actions 里手动运行 `Release` workflow。
-手动运行时，填写类似 `v0.1.0` 这样的版本号。
 如果要自动更新 Homebrew tap，需要在仓库里配置名为 `HOMEBREW_TAP_GITHUB_TOKEN` 的 secret，
 并确保它有权限 push 到 `pppobear/homebrew-tap`。
 
@@ -114,12 +131,32 @@ brew upgrade pinentry-rbw-macos
 - `RBW_PROFILE`
 - `PINENTRY_RBW_SERVICE`
 - `PINENTRY_RBW_ACCOUNT`
+- `PINENTRY_RBW_LOG`（已脱敏的协议元数据；默认关闭，但路径、错误与时间信息仍应按敏感信息处理）
+
+## 卸载与清理
+
+先清除 Keychain 条目，再重置 `rbw` 配置并卸载：
+
+```bash
+pinentry-rbw-macos --clear
+rbw config unset pinentry
+brew uninstall pinentry-rbw-macos
+```
+
+每个使用过的 `RBW_PROFILE` 都需要分别执行清理和配置重置。Homebrew 无法自动删除这些 profile 对应的
+Keychain 条目。
+
+## 安全模型
+
+主密码会持久化到 macOS 登录 Keychain。当前实现是在读取普通 Keychain 条目前先执行
+`LocalAuthentication`；认证尚未由 Keychain 条目自身强制。这能减少日常误访问，但无法防御已经以同一用户
+身份运行、并能绕过或 patch 本程序的代码。
+
+更强的目标方案是使用 Developer ID 签名、notarization，以及受 `.userPresence` 保护的 Keychain 条目。在
+稳定的签名和升级路径建立前，这仍是威胁模型中的明确限制。安全问题报告方式见 [SECURITY.md](./SECURITY.md)。
 
 ## 已知限制
 
 - GUI 密码框依赖桌面会话；SSH 或其他无图形环境会自动回退到终端输入
 - 当前只实现了 `rbw` 所需的最小 `pinentry` 行为
 - Apple Watch 是否会显示为认证选项，取决于 macOS 版本、硬件和系统设置；当前不会强制 companion-only 策略
-- 当前解锁流程是在应用层做保护：先通过 `LocalAuthentication` 完成认证，再读取普通 Keychain 条目。这和使用 `.userPresence` 强制保护的 Keychain 条目不是一回事。
-- 这是当前项目约束下有意做出的实现选择：由于没有 Apple 开发者账号，项目无法建立一条稳定可分发的签名 / entitlement 链路来支持 `.userPresence` 保护的 Keychain 条目。
-- 因此它更适合提升日常使用场景下的保护强度，而不是防御已经能以当前用户身份运行代码，并绕过或 patch 本程序读取路径的本地攻击者。

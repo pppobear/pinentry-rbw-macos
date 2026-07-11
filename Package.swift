@@ -9,8 +9,13 @@ let package = Package(
         .macOS(.v13),
     ],
     targets: [
+        .target(
+            name: "CPinentryTTY",
+            publicHeadersPath: "include"
+        ),
         .executableTarget(
-            name: "pinentry-rbw-macos"
+            name: "pinentry-rbw-macos",
+            dependencies: ["CPinentryTTY"]
         ),
         .testTarget(
             name: "pinentry-rbw-macosTests",

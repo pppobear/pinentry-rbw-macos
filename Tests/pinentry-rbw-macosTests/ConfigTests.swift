@@ -1,57 +1,63 @@
 import Darwin
-import Testing
+import Foundation
+import XCTest
 
 @testable import pinentry_rbw_macos
 
-@Suite("Config.load", .serialized)
-struct ConfigTests {
-    @Test func defaultsWithNoEnv() {
+final class ConfigTests: XCTestCase {
+    func testDefaultsWithNoEnv() {
         let config = withEnv([:]) { Config.load() }
-        #expect(config.service == "com.enoch.pinentry-rbw-macos")
-        #expect(config.account == "rbw:default")
-        #expect(config.logPath == nil)
+        XCTAssertEqual(config.service, "com.enoch.pinentry-rbw-macos")
+        XCTAssertEqual(config.account, "rbw:default")
+        XCTAssertNil(config.logPath)
     }
 
-    @Test func respectsProfileEnvVar() {
+    func testRespectsProfileEnvVar() {
         let config = withEnv(["RBW_PROFILE": "work"]) { Config.load() }
-        #expect(config.account == "rbw:work")
+        XCTAssertEqual(config.account, "rbw:work")
     }
 
-    @Test func respectsServiceOverride() {
+    func testRespectsServiceOverride() {
         let config = withEnv(["PINENTRY_RBW_SERVICE": "com.example.test"]) { Config.load() }
-        #expect(config.service == "com.example.test")
+        XCTAssertEqual(config.service, "com.example.test")
     }
 
-    @Test func respectsAccountOverride() {
+    func testRespectsAccountOverride() {
         let config = withEnv(["PINENTRY_RBW_ACCOUNT": "custom-account"]) { Config.load() }
-        #expect(config.account == "custom-account")
+        XCTAssertEqual(config.account, "custom-account")
     }
 
-    @Test func respectsLogPath() {
+    func testRespectsLogPath() {
         let config = withEnv(["PINENTRY_RBW_LOG": "/tmp/test.log"]) { Config.load() }
-        #expect(config.logPath == "/tmp/test.log")
+        XCTAssertEqual(config.logPath, "/tmp/test.log")
     }
 
-    @Test func accountOverrideTakesPrecedenceOverProfile() {
+    func testAccountOverrideTakesPrecedenceOverProfile() {
         let config = withEnv([
             "RBW_PROFILE": "personal",
             "PINENTRY_RBW_ACCOUNT": "explicit-account",
         ]) { Config.load() }
-        #expect(config.account == "explicit-account")
+        XCTAssertEqual(config.account, "explicit-account")
     }
 }
 
-/// 在指定的环境变量覆盖下执行 `body`，之后恢复原值。
+private let environmentLock = NSLock()
+
+/// Execute with environment overrides and restore all values before releasing the lock.
 private func withEnv<T>(_ vars: [String: String], body: () -> T) -> T {
+    environmentLock.lock()
+    defer { environmentLock.unlock() }
+
     let allKeys = ["RBW_PROFILE", "PINENTRY_RBW_SERVICE", "PINENTRY_RBW_ACCOUNT", "PINENTRY_RBW_LOG"]
     var originals: [String: String?] = [:]
     for key in allKeys { originals[key] = getenv(key).map { String(cString: $0) } }
     for key in allKeys {
         if let value = vars[key] { setenv(key, value, 1) } else { unsetenv(key) }
     }
-    let result = body()
-    for (key, original) in originals {
-        if let original { setenv(key, original, 1) } else { unsetenv(key) }
+    defer {
+        for (key, original) in originals {
+            if let original { setenv(key, original, 1) } else { unsetenv(key) }
+        }
     }
-    return result
+    return body()
 }

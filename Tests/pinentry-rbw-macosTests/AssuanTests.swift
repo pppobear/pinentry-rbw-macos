@@ -1,85 +1,75 @@
-import Testing
+import XCTest
 
 @testable import pinentry_rbw_macos
 
-// MARK: - encodeAssuan
-
-@Suite("encodeAssuan")
-struct EncodeAssuanTests {
-    @Test func encodesNewline() {
-        #expect(encodeAssuan("a\nb") == "a%0Ab")
+final class EncodeAssuanTests: XCTestCase {
+    func testEncodesNewline() {
+        XCTAssertEqual(encodeAssuan("a\nb"), "a%0Ab")
     }
 
-    @Test func encodesCarriageReturn() {
-        #expect(encodeAssuan("a\rb") == "a%0Db")
+    func testEncodesCarriageReturn() {
+        XCTAssertEqual(encodeAssuan("a\rb"), "a%0Db")
     }
 
-    @Test func encodesPercent() {
-        #expect(encodeAssuan("100%") == "100%25")
+    func testEncodesPercent() {
+        XCTAssertEqual(encodeAssuan("100%"), "100%25")
     }
 
-    @Test func leavesPlainTextUnchanged() {
-        #expect(encodeAssuan("hello world!") == "hello world!")
+    func testLeavesPlainTextUnchanged() {
+        XCTAssertEqual(encodeAssuan("hello world!"), "hello world!")
     }
 
-    @Test func handlesEmpty() {
-        #expect(encodeAssuan("") == "")
+    func testHandlesEmpty() {
+        XCTAssertEqual(encodeAssuan(""), "")
     }
 
-    @Test func encodesAllSpecialsTogether() {
-        #expect(encodeAssuan("%\n\r") == "%25%0A%0D")
+    func testEncodesAllSpecialsTogether() {
+        XCTAssertEqual(encodeAssuan("%\n\r"), "%25%0A%0D")
     }
 }
 
-// MARK: - decodeAssuan
-
-@Suite("decodeAssuan")
-struct DecodeAssuanTests {
-    @Test func decodesNewline() {
-        #expect(decodeAssuan("a%0Ab") == "a\nb")
+final class DecodeAssuanTests: XCTestCase {
+    func testDecodesNewline() {
+        XCTAssertEqual(decodeAssuan("a%0Ab"), "a\nb")
     }
 
-    @Test func decodesCarriageReturn() {
-        #expect(decodeAssuan("a%0Db") == "a\rb")
+    func testDecodesCarriageReturn() {
+        XCTAssertEqual(decodeAssuan("a%0Db"), "a\rb")
     }
 
-    @Test func decodesPercent() {
-        #expect(decodeAssuan("100%25") == "100%")
+    func testDecodesPercent() {
+        XCTAssertEqual(decodeAssuan("100%25"), "100%")
     }
 
-    @Test func decodesLowercaseHex() {
-        #expect(decodeAssuan("a%0ab") == "a\nb")
+    func testDecodesLowercaseHex() {
+        XCTAssertEqual(decodeAssuan("a%0ab"), "a\nb")
     }
 
-    @Test func leavesPlainTextUnchanged() {
-        #expect(decodeAssuan("hello world!") == "hello world!")
+    func testLeavesPlainTextUnchanged() {
+        XCTAssertEqual(decodeAssuan("hello world!"), "hello world!")
     }
 
-    @Test func handlesEmpty() {
-        #expect(decodeAssuan("") == "")
+    func testHandlesEmpty() {
+        XCTAssertEqual(decodeAssuan(""), "")
     }
 
-    @Test func ignoresTruncatedEscape() {
-        // %X with only one hex digit — treated as literal
-        #expect(decodeAssuan("%2") == "%2")
+    func testIgnoresTruncatedEscape() {
+        XCTAssertEqual(decodeAssuan("%2"), "%2")
     }
 
-    @Test func ignoresNonHexEscape() {
-        #expect(decodeAssuan("%ZZ") == "%ZZ")
+    func testIgnoresNonHexEscape() {
+        XCTAssertEqual(decodeAssuan("%ZZ"), "%ZZ")
     }
 }
 
-// MARK: - roundtrip
-
-@Suite("Assuan roundtrip")
-struct AssuanRoundtripTests {
-    @Test func roundtripArbitraryString() {
+final class AssuanRoundtripTests: XCTestCase {
+    func testRoundtripArbitraryString() {
         let original = "Master password: P@ss\nw0rd\r100%"
-        #expect(decodeAssuan(encodeAssuan(original)) == original)
+        XCTAssertEqual(decodeAssuan(encodeAssuan(original)), original)
     }
 
-    @Test func roundtripUnicode() {
+    func testRoundtripUnicode() {
         let original = "密码：Test123！"
-        #expect(decodeAssuan(encodeAssuan(original)) == original)
+        XCTAssertEqual(decodeAssuan(encodeAssuan(original)), original)
     }
 }
