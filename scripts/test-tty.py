@@ -9,6 +9,7 @@ import subprocess
 import sys
 import termios
 import time
+from typing import Optional
 
 
 def reset_job_control_signal() -> None:
@@ -33,7 +34,14 @@ def read_until(descriptor: int, needle: bytes, timeout: float = 5) -> bytes:
 
 
 class Session:
-    def __init__(self, binary: str, timeout: str = "0") -> None:
+    def __init__(
+        self,
+        binary: str,
+        timeout: str = "0",
+        prompt: str = "API key client__id",
+        error: Optional[str] = None,
+        locale: Optional[str] = None,
+    ) -> None:
         self.master, self.slave = pty.openpty()
         environment = os.environ.copy()
         environment["SSH_CONNECTION"] = "integration-test"
@@ -57,9 +65,16 @@ class Session:
         greeting = self.process.stdout.readline()
         if greeting != b"OK Pleased to meet you\n":
             raise AssertionError(f"unexpected greeting: {greeting!r}")
-        self.process.stdin.write(b"SETPROMPT API key client__id\nGETPIN\n")
+        commands = []
+        if locale is not None:
+            commands.append(f"OPTION lc-messages={locale}")
+        commands.append(f"SETPROMPT {prompt}")
+        if error is not None:
+            commands.append(f"SETERROR {error}")
+        commands.append("GETPIN")
+        self.process.stdin.write(("\n".join(commands) + "\n").encode("utf-8"))
         self.process.stdin.flush()
-        self.prompt_output = read_until(self.master, b"API key client__id")
+        self.prompt_output = read_until(self.master, prompt.encode("utf-8"))
         self.assert_echo(False)
 
     def assert_echo(self, expected: bool) -> None:
@@ -102,6 +117,24 @@ def test_cancel(binary: str) -> None:
     os.write(session.master, b"\x04")
     session.read_protocol(b"ERR 83886179 operation cancelled")
     session.assert_echo(True)
+    session.finish()
+
+
+def test_unicode_prompt_and_error(binary: str) -> None:
+    session = Session(
+        binary,
+        prompt="密码：",
+        error="密码错误",
+        locale="zh_CN.UTF-8",
+    )
+    if "密码错误".encode("utf-8") not in session.prompt_output:
+        raise AssertionError(f"localized error was not written to the terminal: {session.prompt_output!r}")
+    secret = "秘密-123".encode("utf-8")
+    os.write(session.master, secret + b"\n")
+    session.read_protocol(b"D " + secret + b"\nOK\n")
+    session.assert_echo(True)
+    if secret in session.prompt_output:
+        raise AssertionError("Unicode secret was echoed to the terminal")
     session.finish()
 
 
@@ -171,6 +204,7 @@ def main() -> None:
     for test in (
         test_success,
         test_cancel,
+        test_unicode_prompt_and_error,
         test_timeout,
         test_stop_signal,
         test_terminating_signal,

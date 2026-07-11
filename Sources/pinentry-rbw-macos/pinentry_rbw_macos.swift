@@ -101,7 +101,34 @@ struct PinentryInvocation: Equatable {
     var ttyName: String?
     var timeoutSeconds: Int?
     var display: String?
+    var localeMessages: String?
     var noGlobalGrab = false
+
+    static func localeMessagesHint(in arguments: [String]) -> String? {
+        let otherValueOptions = Set(["--ttyname", "--timeout", "--display"])
+        var locale: String?
+        var index = 0
+        while index < arguments.count {
+            let argument = arguments[index]
+            if let value = inlineValue(for: "--lc-messages", in: argument), !value.isEmpty {
+                locale = value
+                index += 1
+                continue
+            }
+            if argument == "--lc-messages", index + 1 < arguments.count {
+                let value = arguments[index + 1]
+                if !value.isEmpty { locale = value }
+                index += 2
+                continue
+            }
+            if otherValueOptions.contains(argument), index + 1 < arguments.count {
+                index += 2
+                continue
+            }
+            index += 1
+        }
+        return locale
+    }
 
     static func parse(arguments: [String]) throws -> PinentryInvocation {
         var invocation = PinentryInvocation()
@@ -139,9 +166,14 @@ struct PinentryInvocation: Equatable {
                 index += 1
                 continue
             }
+            if let value = inlineValue(for: "--lc-messages", in: argument) {
+                invocation.localeMessages = try requireNonEmpty(value, option: "--lc-messages")
+                index += 1
+                continue
+            }
 
             switch argument {
-            case "--ttyname", "--timeout", "--display":
+            case "--ttyname", "--timeout", "--display", "--lc-messages":
                 let valueIndex = index + 1
                 guard valueIndex < arguments.count else {
                     throw PinentryArgumentError.missingValue(argument)
@@ -152,6 +184,8 @@ struct PinentryInvocation: Equatable {
                     invocation.ttyName = try requireNonEmpty(value, option: argument)
                 case "--timeout":
                     invocation.timeoutSeconds = try parseTimeout(value)
+                case "--lc-messages":
+                    invocation.localeMessages = try requireNonEmpty(value, option: argument)
                 default:
                     invocation.display = try requireNonEmpty(value, option: argument)
                 }
@@ -181,6 +215,13 @@ struct PinentryInvocation: Equatable {
             display = try Self.requireNonEmpty(String(option.dropFirst("display=".count)), option: "display")
             return
         }
+        if option.hasPrefix("lc-messages=") {
+            localeMessages = try Self.requireNonEmpty(
+                String(option.dropFirst("lc-messages=".count)),
+                option: "lc-messages"
+            )
+            return
+        }
         throw PinentryArgumentError.unsupportedOption(option)
     }
 
@@ -204,26 +245,80 @@ struct PinentryInvocation: Equatable {
 }
 
 struct SessionState {
-    var title = "rbw Unlock"
-    var description = ""
-    var prompt = "PIN: "
-    var errorText = ""
-    var okLabel = "OK"
-    var cancelLabel = "Cancel"
-    var notOKLabel: String? = nil
-    var repeatPrompt: String? = nil
-    var repeatErrorText: String? = nil
+    private var localizer: Localizer
+    private var titleIsCallerOwned = false
+    private var promptIsCallerOwned = false
+    private var okLabelIsCallerOwned = false
+    private var cancelLabelIsCallerOwned = false
+    var title: String
+    var description: String
+    var prompt: String
+    var errorText: String
+    var okLabel: String
+    var cancelLabel: String
+    var notOKLabel: String?
+    var repeatPrompt: String?
+    var repeatErrorText: String?
 
-    mutating func reset() {
-        title = "rbw Unlock"
+    init(localizer: Localizer = .english) {
+        self.localizer = localizer
+        title = localizer.text(.defaultTitle)
         description = ""
-        prompt = "PIN: "
+        prompt = localizer.text(.defaultPrompt)
         errorText = ""
-        okLabel = "OK"
-        cancelLabel = "Cancel"
+        okLabel = localizer.text(.okButton)
+        cancelLabel = localizer.text(.cancelButton)
         notOKLabel = nil
         repeatPrompt = nil
         repeatErrorText = nil
+    }
+
+    var language: AppLanguage {
+        localizer.language
+    }
+
+    mutating func relocalize(to newLocalizer: Localizer) {
+        if !titleIsCallerOwned { title = newLocalizer.text(.defaultTitle) }
+        if !promptIsCallerOwned { prompt = newLocalizer.text(.defaultPrompt) }
+        if !okLabelIsCallerOwned { okLabel = newLocalizer.text(.okButton) }
+        if !cancelLabelIsCallerOwned { cancelLabel = newLocalizer.text(.cancelButton) }
+        localizer = newLocalizer
+    }
+
+    mutating func setCallerTitle(_ value: String) {
+        title = value
+        titleIsCallerOwned = true
+    }
+
+    mutating func setCallerPrompt(_ value: String) {
+        prompt = value
+        promptIsCallerOwned = true
+    }
+
+    mutating func setCallerOKLabel(_ value: String, defaultValue: String) {
+        okLabel = value.isEmpty ? defaultValue : value
+        okLabelIsCallerOwned = !value.isEmpty
+    }
+
+    mutating func setCallerCancelLabel(_ value: String, defaultValue: String) {
+        cancelLabel = value.isEmpty ? defaultValue : value
+        cancelLabelIsCallerOwned = !value.isEmpty
+    }
+
+    mutating func reset() {
+        title = localizer.text(.defaultTitle)
+        description = ""
+        prompt = localizer.text(.defaultPrompt)
+        errorText = ""
+        okLabel = localizer.text(.okButton)
+        cancelLabel = localizer.text(.cancelButton)
+        notOKLabel = nil
+        repeatPrompt = nil
+        repeatErrorText = nil
+        titleIsCallerOwned = false
+        promptIsCallerOwned = false
+        okLabelIsCallerOwned = false
+        cancelLabelIsCallerOwned = false
     }
 
     mutating func consumeTransientError() {
@@ -297,10 +392,12 @@ private enum PasswordPromptResult {
 private final class TTY {
     private let path: String
     private let timeoutSeconds: Int?
+    private let localizer: Localizer
 
-    init(path: String? = nil, timeoutSeconds: Int? = nil) {
+    init(path: String? = nil, timeoutSeconds: Int? = nil, localizer: Localizer = .english) {
         self.path = path ?? "/dev/tty"
         self.timeoutSeconds = timeoutSeconds
+        self.localizer = localizer
     }
 
     func printLine(_ text: String) {
@@ -341,18 +438,18 @@ private final class TTY {
         case Int32(PINENTRY_TTY_TIMED_OUT):
             throw PinentryExit.timedOut
         case Int32(PINENTRY_TTY_ERROR):
-            let reason = readError == 0 ? "unknown error" : String(cString: strerror(readError))
-            throw PinentryExit.failed("cannot read from terminal \(path): \(reason)")
+            let reason = readError == 0 ? localizer.text(.unknownTerminalError) : String(cString: strerror(readError))
+            throw PinentryExit.failed(localizer.text(.cannotReadTerminal(path: path, reason: reason)))
         case Int32(PINENTRY_TTY_SUCCESS):
             break
         default:
-            throw PinentryExit.failed("terminal helper returned an unknown status: \(status)")
+            throw PinentryExit.failed(localizer.text(.unknownTerminalStatus(status)))
         }
 
         guard let password = passwordBytes.withUnsafeBufferPointer({ buffer in
             buffer.baseAddress.flatMap { String(validatingCString: $0) }
         }) else {
-            throw PinentryExit.failed("terminal input is not valid UTF-8")
+            throw PinentryExit.failed(localizer.text(.terminalInputInvalidUTF8))
         }
         return password
     }
@@ -360,11 +457,11 @@ private final class TTY {
     private func openTTY() throws -> Int32 {
         let descriptor = Darwin.open(path, O_RDWR | O_NOCTTY | O_CLOEXEC | O_NOFOLLOW)
         guard descriptor >= 0 else {
-            throw PinentryExit.failed("cannot open terminal \(path): \(posixError())")
+            throw PinentryExit.failed(localizer.text(.cannotOpenTerminal(path: path, reason: posixError())))
         }
         guard isatty(descriptor) == 1 else {
             Darwin.close(descriptor)
-            throw PinentryExit.failed("configured tty is not a terminal: \(path)")
+            throw PinentryExit.failed(localizer.text(.configuredPathIsNotTerminal(path)))
         }
         return descriptor
     }
@@ -377,7 +474,7 @@ private final class TTY {
                 let count = Darwin.write(descriptor, baseAddress.advanced(by: written), rawBuffer.count - written)
                 if count < 0 {
                     if errno == EINTR { continue }
-                    throw PinentryExit.failed("cannot write to terminal \(path): \(posixError())")
+                    throw PinentryExit.failed(localizer.text(.cannotWriteTerminal(path: path, reason: posixError())))
                 }
                 written += count
             }
@@ -400,20 +497,27 @@ private enum ConfirmationResult {
 private final class GUI {
     private let display: String?
     private let timeoutSeconds: Int?
+    private let localizer: Localizer
     // AppleScript dialogs never take a global input grab. Retain the parsed value so the
     // invocation semantics remain explicit if another GUI backend is added later.
     private let noGlobalGrab: Bool
 
-    init(display: String? = nil, timeoutSeconds: Int? = nil, noGlobalGrab: Bool = false) {
+    init(
+        display: String? = nil,
+        timeoutSeconds: Int? = nil,
+        noGlobalGrab: Bool = false,
+        localizer: Localizer = .english
+    ) {
         self.display = display
         self.timeoutSeconds = timeoutSeconds
         self.noGlobalGrab = noGlobalGrab
+        self.localizer = localizer
     }
 
     func readPassword(state: SessionState) -> PasswordPromptResult {
         let env = ProcessInfo.processInfo.environment
         if env["SSH_CONNECTION"] != nil || env["SSH_TTY"] != nil {
-            return .unavailable("当前会话是 SSH，跳过 GUI")
+            return .unavailable(localizer.text(.sshPasswordGUIUnavailable))
         }
 
         let process = Process()
@@ -431,7 +535,7 @@ private final class GUI {
         do {
             try process.run()
         } catch {
-            return .unavailable("无法启动 osascript: \(error.localizedDescription)")
+            return .unavailable(localizer.text(.cannotLaunchOsaScript(detail: error.localizedDescription)))
         }
 
         guard waitForExit(process) else { return .timedOut }
@@ -449,7 +553,7 @@ private final class GUI {
         if isAppleScriptCancellation(errorOutput) {
             return .cancelled
         }
-        return .unavailable(errorOutput.isEmpty ? "图形密码框执行失败" : errorOutput)
+        return .unavailable(errorOutput.isEmpty ? localizer.text(.guiPasswordFailed) : errorOutput)
     }
 
     private func buildAppleScript(state: SessionState) -> String {
@@ -485,7 +589,7 @@ private final class GUI {
     func showConfirm(state: SessionState, oneButton: Bool = false) -> ConfirmationResult {
         let env = ProcessInfo.processInfo.environment
         guard env["SSH_CONNECTION"] == nil, env["SSH_TTY"] == nil else {
-            return .unavailable("当前会话是 SSH，无法显示确认对话框")
+            return .unavailable(localizer.text(.sshConfirmationGUIUnavailable))
         }
 
         let message = escapeForAppleScript(
@@ -524,7 +628,7 @@ private final class GUI {
         do {
             try process.run()
         } catch {
-            return .unavailable("无法启动 osascript: \(error.localizedDescription)")
+            return .unavailable(localizer.text(.cannotLaunchOsaScript(detail: error.localizedDescription)))
         }
         guard waitForExit(process) else { return .timedOut }
 
@@ -537,11 +641,11 @@ private final class GUI {
             if isAppleScriptCancellation(errorOutput) {
                 return .cancelled
             }
-            return .unavailable(errorOutput.isEmpty ? "图形确认框执行失败" : errorOutput)
+            return .unavailable(errorOutput.isEmpty ? localizer.text(.guiConfirmationFailed) : errorOutput)
         }
         if result == state.okLabel { return .confirmed }
         if result == state.notOKLabel { return .rejected }
-        return oneButton ? .unavailable("图形确认框返回了未知结果") : .cancelled
+        return oneButton ? .unavailable(localizer.text(.guiConfirmationUnknownResult)) : .cancelled
     }
 
     private func configureEnvironment(for process: Process) {
@@ -580,6 +684,7 @@ private final class GUI {
 
 private struct KeychainStore {
     let config: Config
+    let localizer: Localizer
 
     /// 从 Keychain 读取已存密码。
     ///
@@ -625,12 +730,14 @@ private struct KeychainStore {
             let updateStatus = SecItemUpdate(query as CFDictionary, attributesToUpdate as CFDictionary)
             guard updateStatus == errSecSuccess else {
                 throw PinentryExit.failed(
-                    SecCopyErrorMessageString(updateStatus, nil) as String? ?? "Keychain 更新失败: \(updateStatus)"
+                    SecCopyErrorMessageString(updateStatus, nil) as String?
+                        ?? localizer.text(.keychainUpdateFailed(status: updateStatus))
                 )
             }
         default:
             throw PinentryExit.failed(
-                SecCopyErrorMessageString(addStatus, nil) as String? ?? "Keychain 写入失败: \(addStatus)"
+                SecCopyErrorMessageString(addStatus, nil) as String?
+                    ?? localizer.text(.keychainWriteFailed(status: addStatus))
             )
         }
     }
@@ -639,7 +746,8 @@ private struct KeychainStore {
         let status = SecItemDelete(itemQuery() as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw PinentryExit.failed(
-                SecCopyErrorMessageString(status, nil) as String? ?? "Keychain 删除失败: \(status)"
+                SecCopyErrorMessageString(status, nil) as String?
+                    ?? localizer.text(.keychainDeleteFailed(status: status))
             )
         }
     }
@@ -659,7 +767,7 @@ private struct KeychainStore {
                 let data = item as? Data,
                 let password = String(data: data, encoding: .utf8)
             else {
-                return .unavailable("Keychain 返回了不可解析的数据")
+                return .unavailable(localizer.text(.keychainInvalidData))
             }
             return .success(password)
         case errSecItemNotFound:
@@ -667,7 +775,10 @@ private struct KeychainStore {
         case errSecUserCanceled, errSecAuthFailed:
             return .cancelled
         default:
-            return .unavailable(SecCopyErrorMessageString(status, nil) as String? ?? "Keychain 读取失败: \(status)")
+            return .unavailable(
+                SecCopyErrorMessageString(status, nil) as String?
+                    ?? localizer.text(.keychainReadFailed(status: status))
+            )
         }
     }
 
@@ -689,16 +800,17 @@ private struct KeychainStore {
         }
         guard existsStatus == errSecSuccess else {
             return .unavailable(
-                SecCopyErrorMessageString(existsStatus, nil) as String? ?? "Keychain 检查失败: \(existsStatus)"
+                SecCopyErrorMessageString(existsStatus, nil) as String?
+                    ?? localizer.text(.keychainCheckFailed(status: existsStatus))
             )
         }
 
         let context = LAContext()
-        context.localizedFallbackTitle = "输入登录密码"
+        context.localizedFallbackTitle = localizer.text(.loginPasswordFallback)
 
         var authError: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
-            return .unavailable(authError?.localizedDescription ?? "当前设备不支持 LocalAuthentication")
+            return .unavailable(authError?.localizedDescription ?? localizer.text(.localAuthenticationUnavailable))
         }
 
         final class AuthBox: @unchecked Sendable {
@@ -715,7 +827,7 @@ private struct KeychainStore {
                 if nsError?.code == LAError.userCancel.rawValue || nsError?.code == LAError.appCancel.rawValue {
                     authBox.result = .cancelled
                 } else {
-                    authBox.result = .unavailable(nsError?.localizedDescription ?? "认证失败")
+                    authBox.result = .unavailable(nsError?.localizedDescription ?? localizer.text(.authenticationFailed))
                 }
             }
             semaphore.signal()
@@ -767,18 +879,35 @@ private final class PinentryServer {
         "SETPROMPT", "SETREPEAT", "SETREPEATERROR", "SETTITLE",
     ])
 
-    private let config = Config.load()
+    private let config: Config
     private var invocation = PinentryInvocation()
-    private var tty = TTY()
-    private var gui = GUI()
+    private var localizer: Localizer
+    private var tty: TTY
+    private var gui: GUI
     private lazy var logger = DebugLog(path: config.logPath)
-    private lazy var keychain = KeychainStore(config: config)
-    private var state = SessionState()
+    private var keychain: KeychainStore {
+        KeychainStore(config: config, localizer: localizer)
+    }
+    private var state: SessionState
+
+    init() {
+        config = Config.load()
+        let localizer = Localizer.resolve()
+        self.localizer = localizer
+        tty = TTY(localizer: localizer)
+        gui = GUI(localizer: localizer)
+        state = SessionState(localizer: localizer)
+    }
 
     func run(arguments: [String]) -> Int32 {
         do {
             logger.write("start argc=\(arguments.count)")
-            invocation = try PinentryInvocation.parse(arguments: Array(arguments.dropFirst()))
+            let startupArguments = Array(arguments.dropFirst())
+            if let localeHint = PinentryInvocation.localeMessagesHint(in: startupArguments) {
+                updateLocalization(to: Localizer.resolve(explicitLocale: localeHint))
+            }
+            invocation = try PinentryInvocation.parse(arguments: startupArguments)
+            refreshLocalization()
             configureUserInteraction()
             if let command = invocation.managementCommand {
                 try runManagementCommand(command)
@@ -805,6 +934,11 @@ private final class PinentryServer {
             logger.write("fatal messageBytes=\(message.utf8.count)")
             FileHandle.standardError.write(Data(("fatal: \(message)\n").utf8))
             return 2
+        } catch let error as PinentryArgumentError {
+            let message = localizer.argumentError(error)
+            logger.write("fatal messageBytes=\(message.utf8.count)")
+            FileHandle.standardError.write(Data(("fatal: \(message)\n").utf8))
+            return 2
         } catch {
             logger.write("fatal messageBytes=\(error.localizedDescription.utf8.count)")
             FileHandle.standardError.write(Data(("fatal: \(error.localizedDescription)\n").utf8))
@@ -813,52 +947,52 @@ private final class PinentryServer {
     }
 
     private func configureUserInteraction() {
-        tty = TTY(path: invocation.ttyName, timeoutSeconds: invocation.timeoutSeconds)
+        tty = TTY(
+            path: invocation.ttyName,
+            timeoutSeconds: invocation.timeoutSeconds,
+            localizer: localizer
+        )
         gui = GUI(
             display: invocation.display,
             timeoutSeconds: invocation.timeoutSeconds,
-            noGlobalGrab: invocation.noGlobalGrab
+            noGlobalGrab: invocation.noGlobalGrab,
+            localizer: localizer
         )
+    }
+
+    private func refreshLocalization() {
+        let updated = Localizer.resolve(explicitLocale: invocation.localeMessages)
+        updateLocalization(to: updated)
+    }
+
+    private func updateLocalization(to updated: Localizer) {
+        guard updated != localizer else { return }
+        state.relocalize(to: updated)
+        localizer = updated
     }
 
     private func runManagementCommand(_ command: String) throws {
         switch command {
         case "--store":
-            var storeState = SessionState()
-            storeState.description = "Enter your Bitwarden master password."
-            storeState.prompt = "Master password: "
+            var storeState = SessionState(localizer: localizer)
+            storeState.description = localizer.text(.storeDescription)
+            storeState.prompt = localizer.text(.storePrompt)
             let password = try readPasswordInteractively(state: storeState)
             try keychain.savePassword(password)
-            print("stored \(config.account) in \(config.service)")
+            print(localizer.text(.stored(account: config.account, service: config.service)))
         case "--store-stdin":
             let password = try readPasswordFromStdin()
             try keychain.savePassword(password)
-            print("stored \(config.account) in \(config.service)")
+            print(localizer.text(.stored(account: config.account, service: config.service)))
         case "--clear":
             try keychain.deletePassword()
-            print("cleared \(config.account) in \(config.service)")
+            print(localizer.text(.cleared(account: config.account, service: config.service)))
         case "--help":
-            print("""
-            pinentry-rbw-macos
-
-            Usage:
-              pinentry-rbw-macos            Run the pinentry server
-              pinentry-rbw-macos --store    Prompt securely and seed Keychain
-              pinentry-rbw-macos --store-stdin
-                                            Read a password from stdin and seed Keychain
-              pinentry-rbw-macos --clear    Remove the stored password
-              pinentry-rbw-macos --version  Print the program version
-
-            Environment:
-              RBW_PROFILE             Used to separate entries by rbw profile
-              PINENTRY_RBW_SERVICE    Override Keychain service name
-              PINENTRY_RBW_ACCOUNT    Override Keychain account name
-              PINENTRY_RBW_LOG        Write redacted protocol metadata to a private log
-            """)
+            print(localizer.text(.help))
         case "--version":
             print(appVersion)
         default:
-            throw PinentryExit.failed("unknown argument: \(command)")
+            throw PinentryExit.failed(localizer.text(.unknownManagementCommand(command)))
         }
     }
 
@@ -871,6 +1005,7 @@ private final class PinentryServer {
         case "OPTION":
             do {
                 try invocation.applyProtocolOption(argument)
+                refreshLocalization()
                 configureUserInteraction()
                 writeOK()
             } catch {
@@ -893,15 +1028,15 @@ private final class PinentryServer {
             writeOK()
             return true
         case "SETOK":
-            state.okLabel = argument.isEmpty ? "OK" : argument
+            state.setCallerOKLabel(argument, defaultValue: localizer.text(.okButton))
             writeOK()
             return true
         case "SETCANCEL":
-            state.cancelLabel = argument.isEmpty ? "Cancel" : argument
+            state.setCallerCancelLabel(argument, defaultValue: localizer.text(.cancelButton))
             writeOK()
             return true
         case "SETTITLE":
-            state.title = argument
+            state.setCallerTitle(argument)
             writeOK()
             return true
         case "SETDESC":
@@ -909,7 +1044,7 @@ private final class PinentryServer {
             writeOK()
             return true
         case "SETPROMPT":
-            state.prompt = argument
+            state.setCallerPrompt(argument)
             writeOK()
             return true
         case "SETERROR":
@@ -1009,7 +1144,7 @@ private final class PinentryServer {
             writeOK()
         case .unavailable(let reason):
             logger.write("GETPIN unavailable; fallback tty reasonBytes=\(reason.utf8.count)")
-            tty.printLine("[pinentry-rbw-macos] Keychain/生物识别不可用，回退到手动输入：\(reason)")
+            tty.printLine(localizer.text(.keychainFallback(reason: reason)))
             let password = try readPasswordInteractively(state: state)
             updateCacheBestEffort(password)
             writeData(password)
@@ -1033,7 +1168,7 @@ private final class PinentryServer {
             let password = try promptPassword(state: currentState)
 
             var repeatState = state
-            repeatState.prompt = repeatLabel.isEmpty ? "Repeat: " : repeatLabel
+            repeatState.prompt = repeatLabel.isEmpty ? localizer.text(.repeatPrompt) : repeatLabel
             repeatState.description = ""
             repeatState.errorText = ""
             let confirmation = try promptPassword(state: repeatState)
@@ -1041,7 +1176,7 @@ private final class PinentryServer {
             if password == confirmation { return password }
 
             logger.write("GETPIN repeat mismatch, re-prompting")
-            currentState.errorText = state.repeatErrorText ?? "Passphrases do not match."
+            currentState.errorText = state.repeatErrorText ?? localizer.text(.passphrasesDoNotMatch)
         }
     }
 
@@ -1058,7 +1193,7 @@ private final class PinentryServer {
             throw PinentryExit.timedOut
         case .unavailable(let reason):
             logger.write("GUI unavailable; fallback tty reasonBytes=\(reason.utf8.count)")
-            tty.printLine("[pinentry-rbw-macos] GUI 不可用，回退到终端输入：\(reason)")
+            tty.printLine(localizer.text(.guiFallback(reason: reason)))
             return try readPasswordFromTTY(state: state)
         }
     }
@@ -1071,10 +1206,10 @@ private final class PinentryServer {
             tty.printLine(state.description)
         }
         if !state.errorText.isEmpty {
-            tty.printLine("Error: \(state.errorText)")
+            tty.printLine("\(localizer.text(.errorPrefix)) \(state.errorText)")
         }
 
-        let label = state.prompt.isEmpty ? "PIN: " : state.prompt
+        let label = state.prompt.isEmpty ? localizer.text(.defaultPrompt) : state.prompt
         return try tty.readPassphrase(label: label)
     }
 
@@ -1082,7 +1217,7 @@ private final class PinentryServer {
         var data = FileHandle.standardInput.readDataToEndOfFile()
         defer { data.resetBytes(in: 0..<data.count) }
         guard var password = String(data: data, encoding: .utf8) else {
-            throw PinentryExit.failed("stdin does not contain valid UTF-8")
+            throw PinentryExit.failed(localizer.text(.standardInputInvalidUTF8))
         }
         while password.last == "\n" || password.last == "\r" {
             password.removeLast()
@@ -1098,7 +1233,7 @@ private final class PinentryServer {
             try keychain.savePassword(password)
         } catch {
             logger.write("Keychain cache update failed errorBytes=\(error.localizedDescription.utf8.count)")
-            tty.printLine("[pinentry-rbw-macos] 警告：本次密码可用，但无法更新 Keychain 缓存。")
+            tty.printLine(localizer.text(.cacheUpdateWarning))
         }
     }
 

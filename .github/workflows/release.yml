@@ -140,6 +140,7 @@ jobs:
           set -euo pipefail
           binary_path="$(swift build -c release --show-bin-path)/$BINARY_NAME"
           python3 scripts/test-tty.py "$binary_path"
+          python3 scripts/test-i18n.py "$binary_path"
 
       - name: Verify binary and protocol version
         shell: bash
@@ -182,6 +183,7 @@ jobs:
           cp README.md "$archive_dir/README.md"
           cp README.zh-CN.md "$archive_dir/README.zh-CN.md"
           cp SECURITY.md "$archive_dir/SECURITY.md"
+          cp SECURITY.zh-CN.md "$archive_dir/SECURITY.zh-CN.md"
           cp completions/_pinentry-rbw-macos "$archive_dir/completions/"
           cp completions/pinentry-rbw-macos.fish "$archive_dir/completions/"
 
@@ -196,6 +198,7 @@ jobs:
           $archive_name/README.md
           $archive_name/README.zh-CN.md
           $archive_name/SECURITY.md
+          $archive_name/SECURITY.zh-CN.md
           $archive_name/completions/
           $archive_name/completions/_pinentry-rbw-macos
           $archive_name/completions/pinentry-rbw-macos.fish
@@ -508,6 +511,7 @@ jobs:
           $archive_root/README.md
           $archive_root/README.zh-CN.md
           $archive_root/SECURITY.md
+          $archive_root/SECURITY.zh-CN.md
           $archive_root/completions/
           $archive_root/completions/_pinentry-rbw-macos
           $archive_root/completions/pinentry-rbw-macos.fish
